@@ -2,6 +2,14 @@
 
 ### Note: This Electron application has been coded with heavy AI assistance. It has been tested locally by me (i use it daily). If you are not comfortable with this, then it is your perogative to not use it.
 
+### Requiremenmts
+
+- NodeJS
+https://nodejs.org/en/download
+
+- Python
+https://www.python.org/downloads/
+
 ## To set up and run
 
 ### 1. Install Electron
@@ -88,6 +96,11 @@ Download from: https://github.com/thewh1teagle/kokoro-onnx/releases
 If you run a local OpenAI-compatible server at `http://localhost:8080/v1/chat/completions`, the engine will use it to disambiguate cases where multiple definitions could match the same marker.
 
 You will need to shut down this AI after you run the note markers scan, BEFORE you run the TTS scan, as both make use of the GPU if you are using GPU Execution for the TTS.
+
+### 6. To start the app
+```
+npm run start
+```
 
 ---
 
