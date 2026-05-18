@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>StarListener</title>
+    <script src="javascript.js" defer></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>StarListener</h1>
+    <div id="currentFile">No book loaded</div>
+    <div class="controls">
+        <button id="loadBtn">Open File</button>
+        <button id="scanBtn" disabled>Process Note Markers</button>
+        <button id="ttsBtn" disabled>Process Text to Speech</button>
+        <label for="markerProfile" style="margin-left: 12px;">Note markers:</label>
+        <select id="markerProfile">
+            <option value="auto_heur" selected>Auto (heuristics)</option>
+            <option value="auto_ai">Auto (AI if available)</option>
+            <option value="numeric">Numeric (includes super/subscripts)</option>
+            <option value="symbol">Symbols (* † ‡ §)</option>
+            <option value="letter">Letters (a/b/c)</option>
+        </select>
+    </div>
+    <div class="voice-selectors">
+        <div class="voice-row">
+            <label>Main Prose Voice:</label>
+            <select id="mainVoice"></select>
+            <button id="testMainVoice">Play Test</button>
+        </div>
+        <div class="voice-row">
+            <label>Footnote Voice:</label>
+            <select id="footnoteVoice"></select>
+            <button id="testFootnoteVoice">Play Test</button>
+        </div>
+    </div>
+    <div class="speed-row">
+        <label>Audio Speed:</label>
+        <select id="playbackSpeed">
+            <option value="0.75">0.75x</option>
+            <option value="0.8">0.8x</option>
+            <option value="0.9">0.9x</option>
+            <option value="1.0" selected>1.0x</option>
+            <option value="1.1">1.1x</option>
+            <option value="1.2">1.2x</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x</option>
+            <option value="1.75">1.75x</option>
+            <option value="2.0">2.0x</option>
+        </select>
+    </div>
+    <div class="footnote-options" id="footnoteOptions" style="display:none;">
+        <label>Footnotes:</label>
+        <select id="footnoteMode" disabled>
+            <option value="as_is" selected>As They Appear (end of chapter)</option>
+            <option value="inline">Read Inline (at each marker)</option>
+            <option value="skip">Don't Read (marker only, skip definitions)</option>
+        </select>
+    </div>
+    <div id="chapterList" style="margin-top: 20px;"></div>
+    <p id="output"></p>
+    <div id="audioContainer"></div>
+    <div id="searchBar" class="search-bar" style="display:none;">
+        <input type="text" id="searchInput" placeholder="Search in text..." />
+        <button id="findBtn">Find</button>
+        <button id="findPrevBtn" disabled>&#9664; Prev</button>
+        <button id="findNextBtn" disabled>Next &#9654;</button>
+        <span id="searchStatus"></span>
+        <button id="clearSearchBtn" style="background:#555;">&#10005;</button>
+    </div>
+    <div id="textDisplay" class="text-display"></div>
+    <h2>Footnote Discovery</h2>
+    <div id="footnoteContainer"></div>
+
+</body>
+</html>

@@ -1,0 +1,258 @@
+body { 
+    font-family: sans-serif; 
+    padding: 20px; background: #1a1a1a; 
+    color: white; 
+}
+        
+textarea { 
+    width: 100%; 
+    height: 100px; 
+    margin-bottom: 10px;
+}
+        
+button { 
+    padding: 10px 20px; 
+    cursor: pointer; 
+    background: #4a90e2; 
+    border: none;
+    color: white; 
+    border-radius: 4px; 
+}
+
+.controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+select {
+    padding: 9px 12px;
+    background: #2a2a2a;
+    color: white;
+    border: 1px solid #444;
+    border-radius: 4px;
+}
+
+.footnote-card {
+        background: #2a2a2a;
+        border-left: 4px solid #3d5afe;
+        padding: 15px;
+        margin-bottom: 15px;
+        border-radius: 8px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border: 1px solid #333;
+}
+
+.verified-badge { background: #2e7d32 !important; color: white; }
+.warning-badge { background: #ffa000 !important; color: black; }
+.context-text { font-size: 0.9em; line-height: 1.4; margin: 8px 0; }
+
+.context-text { 
+    font-style: italic;
+    color: #bbb;
+}
+.badge {
+    background: #555;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-size: 0.8em;
+}
+
+.footnote-group {
+    background: #2a2a2a;
+    border-radius: 8px;
+    padding: 15px;
+    margin: 20px 0;
+    border: 1px solid #444;
+}
+
+.footnote-group .group-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #444;
+}
+
+.footnote-group .group-header h3 {
+    margin: 0;
+    font-size: 1.2em;
+}
+
+.footnote-group .footnote-card {
+    background: #333;
+    border-left: 4px solid #4caf50;
+    margin: 8px 0;
+}
+
+#currentFile {
+    color: #aaa;
+    font-size: 0.85em;
+    margin-bottom: 10px;
+}
+
+button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.voice-selectors {
+    margin-top: 14px;
+    padding: 12px 0;
+    border-top: 1px solid #333;
+    border-bottom: 1px solid #333;
+}
+
+.voice-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.voice-row:last-child {
+    margin-bottom: 0;
+}
+
+.voice-row label {
+    min-width: 130px;
+    font-size: 0.9em;
+    color: #ccc;
+}
+
+.voice-row select {
+    min-width: 160px;
+}
+
+.voice-row button {
+    padding: 6px 14px;
+    font-size: 0.85em;
+}
+
+.speed-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px solid #333;
+}
+
+.speed-row label {
+    min-width: 130px;
+    font-size: 0.9em;
+    color: #ccc;
+}
+
+.speed-row select {
+    min-width: 100px;
+}
+
+.footnote-options {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.footnote-options label {
+    min-width: 130px;
+    font-size: 0.9em;
+    color: #ccc;
+}
+
+.footnote-options select {
+    min-width: 260px;
+}
+
+.text-display {
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    font-family: 'Courier New', monospace;
+    font-size: 0.9em;
+    line-height: 1.7;
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 12px;
+    margin: 12px 0;
+    display: none;
+}
+
+.text-display span {
+    transition: background 0.1s;
+    border-radius: 2px;
+}
+
+.text-display span.para-span {
+    display: block;
+    margin-bottom: 10px;
+}
+
+.text-display span.highlighted,
+.text-display .para-block.highlighted {
+    background: #ffeb3b;
+    color: #000;
+}
+
+.para-block {
+    display: block;
+    cursor: pointer;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 2px 6px;
+    margin-bottom: 8px;
+}
+
+.para-block:hover {
+    border-color: #4a90e2;
+    background: rgba(74, 144, 226, 0.05);
+}
+
+.search-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.search-bar input {
+    padding: 6px 10px;
+    background: #2a2a2a;
+    color: white;
+    border: 1px solid #444;
+    border-radius: 4px;
+    flex: 1;
+    max-width: 300px;
+    font-size: 0.9em;
+}
+
+.search-bar input:focus {
+    outline: none;
+    border-color: #4a90e2;
+}
+
+.search-bar #searchStatus {
+    color: #888;
+    font-size: 0.85em;
+    margin-left: 4px;
+    white-space: nowrap;
+}
+
+.text-display mark.search-match {
+    background: #2196f3;
+    color: #fff;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+.text-display mark.search-match.current {
+    background: #ff5722;
+    color: #fff;
+    outline: 1px solid #ff9800;
+}

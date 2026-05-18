@@ -1,0 +1,17 @@
+node_modules/
+venv/
+.venv/
+__pycache__/
+dist/
+out/
+.env
+.roo
+*.mp3
+*.wav
+output/
+tools/
+*.epub
+*.pdf
+/tests/*.json
+/assets/*
+backup/
