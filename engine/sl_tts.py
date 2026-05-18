@@ -155,7 +155,34 @@ def _apply_custom_phonemes(text: str, pron_dict: dict, lang: str, tokenizer) -> 
     if last_end < len(text):
         parts.append(tokenizer.phonemize(text[last_end:], lang))
 
-    return "".join(parts)
+    return " ".join(parts)
+
+
+# kokoro_onnx has an off-by-one bug: after truncating phonemes to MAX_PHONEME_LENGTH (510),
+# it tries voice[len(tokens)] which crashes when len(tokens) == 510.
+# We chunk to 509 to stay safely within bounds.
+_PHONEME_CHUNK_MAX = 509
+
+
+def _chunk_phonemes(phonemes: str, max_len: int = _PHONEME_CHUNK_MAX) -> list:
+    if len(phonemes) <= max_len:
+        return [phonemes]
+    parts = phonemes.split(" ")
+    chunks = []
+    current = ""
+    for part in parts:
+        if len(current) + len(part) + (1 if current else 0) > max_len:
+            if current:
+                chunks.append(current)
+            while len(part) > max_len:
+                chunks.append(part[:max_len])
+                part = part[max_len:]
+            current = part
+        else:
+            current = (current + " " + part) if current else part
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _wav_to_mp3(wav_path: str, mp3_path: str, bitrate: str) -> bool:
@@ -312,11 +339,16 @@ def _generate_tts_from_paragraphs(text: str, lang: str, kokoro: Kokoro, voice: s
 
         if pron_dict:
             phonemes = _apply_custom_phonemes(para, pron_dict, lang, kokoro.tokenizer)
-            samples, sr = kokoro.create(phonemes, voice=voice, speed=speed, lang=lang, is_phonemes=True, trim=False)
+            chunks = _chunk_phonemes(phonemes)
+            chunk_samples = []
+            for chunk in chunks:
+                s, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang, is_phonemes=True, trim=False)
+                chunk_samples.append(s.flatten() if s.ndim > 1 else s)
+            flat = np.concatenate(chunk_samples) if chunk_samples else np.array([], dtype=np.float32)
         else:
             samples, sr = kokoro.create(para, voice=voice, speed=speed, lang=lang, trim=False)
+            flat = samples.flatten() if samples.ndim > 1 else samples
 
-        flat = samples.flatten() if samples.ndim > 1 else samples
         para_duration_ms = len(flat) / sr * 1000.0
         para_start_ms = cum_samples / sr * 1000.0
         para_end_ms = para_start_ms + para_duration_ms
@@ -359,11 +391,16 @@ def _generate_segmented_audio(
 
         if pron_dict:
             phonemes = _apply_custom_phonemes(text, pron_dict, lang, kokoro.tokenizer)
-            samples, sr = kokoro.create(phonemes, voice=voice, speed=speed, lang=lang, is_phonemes=True, trim=False)
+            chunks = _chunk_phonemes(phonemes)
+            chunk_samples = []
+            for chunk in chunks:
+                s, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang, is_phonemes=True, trim=False)
+                chunk_samples.append(s.flatten() if s.ndim > 1 else s)
+            flat = np.concatenate(chunk_samples) if chunk_samples else np.array([], dtype=np.float32)
         else:
             samples, sr = kokoro.create(text, voice=voice, speed=speed, lang=lang, trim=False)
+            flat = samples.flatten() if samples.ndim > 1 else samples
 
-        flat = samples.flatten() if samples.ndim > 1 else samples
         seg_duration_ms = len(flat) / sr * 1000.0
         seg_start_ms = cum_samples / sr * 1000.0
         seg_end_ms = seg_start_ms + seg_duration_ms
