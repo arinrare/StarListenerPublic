@@ -794,14 +794,20 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
         return False
 
-    def _parse_toc_chapter_map() -> Tuple[Dict[str, str], bool]:
+    def _parse_toc_chapter_map() -> Tuple[Dict[str, str], Dict[str, List[Tuple[str, str, bool, Optional[str]]]], bool]:
         """Parse toc.ncx to extract a file→chapter-label map from the navMap.
 
         Returns:
-          (file_to_label: dict mapping file basename → chapter label, is_high_quality: bool)
+          (file_to_label: dict mapping file basename → first *leaf* chapter label,
+           toc_anchors_by_file: dict mapping file basename →
+               [(anchor_fragment, label, is_heading, parent_anchor), ...]
+               where is_heading=True when the navPoint has child navPoints,
+               and parent_anchor is the anchor of the parent heading (None for headings),
+           is_high_quality: bool)
         """
 
         file_to_label: Dict[str, str] = {}
+        toc_anchors_by_file: Dict[str, List[Tuple[str, str, bool, Optional[str]]]] = {}
         try:
             toc_item = book.get_item_with_href("toc.ncx") or book.get_item_with_id("ncx")
             if toc_item is None:
@@ -811,7 +817,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         toc_item = it
                         break
             if toc_item is None:
-                return file_to_label, False
+                return file_to_label, toc_anchors_by_file, False
 
             toc_xml = toc_item.get_content()
             toc_text = toc_xml.decode("utf-8", errors="ignore") if isinstance(toc_xml, bytes) else str(toc_xml)
@@ -823,7 +829,21 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                   "about the publisher", "other books", "searchable terms",
                                   "note on accessibility"}
 
-            for np in toc_soup.find_all("navPoint"):
+            # Build parent→children mapping for heading/leaf detection.
+            all_nps = toc_soup.find_all("navPoint")
+            parent_anchor_of: Dict[str, Optional[str]] = {}
+            for np in all_nps:
+                children = np.find_all("navPoint", recursive=False)
+                for child in children:
+                    child_src = _safe_text(child.find("content").get("src") or "").strip()
+                    child_anchor = (child_src.split("#", 1)[1].strip()
+                                    if child_src and "#" in child_src else None)
+                    parent_src = _safe_text(np.find("content").get("src") or "").strip()
+                    parent_anchor = (parent_src.split("#", 1)[1].strip()
+                                     if parent_src and "#" in parent_src else None)
+                    parent_anchor_of[child_anchor] = parent_anchor
+
+            for np in all_nps:
                 total_points += 1
                 label_el = np.find("navLabel")
                 text_el = label_el.find("text") if label_el else None
@@ -836,8 +856,15 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 if not label or not src:
                     continue
 
-                # Extract the file basename from src (strip anchor fragment).
-                file_part = src.split("#")[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+                # Extract file basename and anchor fragment from src.
+                src_parts = src.split("#", 1)
+                file_part = src_parts[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+                anchor = src_parts[1].strip() if len(src_parts) > 1 and src_parts[1].strip() else None
+
+                # A navPoint with child navPoints is a structural heading (part divider).
+                children = np.find_all("navPoint", recursive=False)
+                is_heading = len(children) > 0
+                parent_anchor_val = parent_anchor_of.get(anchor)
 
                 # Count non-trivial, non-frontmatter labels as high-quality.
                 label_lower = label.lower().strip()
@@ -849,15 +876,27 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 ):
                     valid_labels += 1
 
-                # Only map file if not already mapped (first navPoint wins for each file).
-                if file_part not in file_to_label:
+                # For simple file→label mapping, prefer the first *leaf* (non-heading) entry.
+                if not is_heading and file_part not in file_to_label:
                     file_to_label[file_part] = label
 
+                # Track all entries per file for multi-anchor splitting.
+                if file_part not in toc_anchors_by_file:
+                    toc_anchors_by_file[file_part] = []
+                if anchor:
+                    toc_anchors_by_file[file_part].append(
+                        (anchor, label, is_heading, parent_anchor_val)
+                    )
+                elif not toc_anchors_by_file[file_part]:
+                    toc_anchors_by_file[file_part].append(
+                        (None, label, is_heading, parent_anchor_val)
+                    )
+
             is_high_quality = valid_labels >= 5 and (total_points < 1 or valid_labels / max(1, total_points) >= 0.25)
-            return file_to_label, is_high_quality
+            return file_to_label, toc_anchors_by_file, is_high_quality
 
         except Exception:
-            return file_to_label, False
+            return file_to_label, toc_anchors_by_file, False
 
     def _items_in_spine_order() -> List[Any]:
         """Return EPUB document items in spine (reading) order.
@@ -1003,7 +1042,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
     # Parse the TOC for chapter structure. A high-quality TOC provides chapter labels
     # and boundaries that are more reliable than text-based heuristics.
-    toc_file_to_label, toc_is_high_quality = _parse_toc_chapter_map()
+    toc_file_to_label, toc_anchors_by_file, toc_is_high_quality = _parse_toc_chapter_map()
 
     # Decide marker profile once per book (used to suppress obviously-wrong marker families).
     effective_profile = (options.marker_profile or "auto_heur").strip().lower()
@@ -2039,7 +2078,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         # help identify chapter boundaries.
         label_lines = anchor_text.split("\n")
         toc_label: Optional[str] = None
-        if st_rst_convention and toc_is_high_quality:
+        if toc_is_high_quality:
             chapter_file_key = (source_meta.get("chapter_name") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
             if chapter_file_key in toc_file_to_label:
                 toc_label = toc_file_to_label[chapter_file_key]
@@ -2138,7 +2177,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         # (e.g., commentary pages split across spine items) should not override
         # the inherited context from a TOC-mapped parent chapter.
         heuristic_label_is_plausible = bool(inferred_label and _label_is_plausible_chapter_label(inferred_label))
-        heuristic_blocked_by_toc = st_rst_convention and toc_is_high_quality and not toc_label
+        heuristic_blocked_by_toc = toc_is_high_quality and not toc_label
         use_heuristic_label = heuristic_label_is_plausible and not heuristic_blocked_by_toc
 
         if use_heuristic_label:
@@ -2624,12 +2663,19 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             break
 
                     if not anchors_after_defs:
+                        defs_start_pos = int(line_starts2[defs_start]) if 0 <= defs_start < len(line_starts2) else 0
                         filtered_heads2: List[Tuple[int, str]] = []
                         for hpos, hlabel in headings:
                             if not isinstance(hpos, int) or hpos < 0:
                                 continue
                             li = bisect.bisect_right(line_starts2, hpos) - 1
                             if li >= defs_start:
+                                # Preserve clear structural chapter boundaries (PART/CHAPTER)
+                                # that sit far after the notes region — they represent real
+                                # chapter divisions, not editorial subsection headings.
+                                if (_looks_like_structural_part_or_book_heading(hlabel)
+                                        and (int(hpos) - defs_start_pos) > 5000):
+                                    filtered_heads2.append((hpos, hlabel))
                                 continue
                             filtered_heads2.append((hpos, hlabel))
                         headings = filtered_heads2
@@ -3604,6 +3650,169 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
             except Exception:
                 pass
 
+        # ── Multi-TOC tail extraction ──────────────────────────────────
+        # When a spine file spans multiple TOC chapters and its first
+        # chapter notes block (detected by infer_notes_split) sits before
+        # the next TOC chapter boundary, the prose after that boundary is
+        # incorrectly excluded from anchor extraction.  Find the first
+        # TOC anchor far enough past the split and re-extract anchors
+        # from that tail region.
+        if toc_is_high_quality and toc_anchors_by_file and split is not None and isinstance(defs_start, int):
+            try:
+                _tk_file_key = (source_meta.get("chapter_name") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+                _tk_entries = toc_anchors_by_file.get(_tk_file_key, [])
+                _tk_anchored = [(a, l, h, p) for (a, l, h, p) in _tk_entries if a]
+                if len(_tk_anchored) >= 2:
+                    # Build line_starts for defs_start char offset.
+                    _tk_ls: List[int] = []
+                    _tk_run = 0
+                    for _tk_ln in lines:
+                        _tk_ls.append(_tk_run)
+                        _tk_run += len(_tk_ln) + 1
+                    _defs_pos = int(_tk_ls[defs_start]) if 0 <= defs_start < len(_tk_ls) else 0
+
+                    # Find the first TOC anchor position well past the notes split.
+                    _tail_start: Optional[int] = None
+                    for _tka, _tkl, _tkh, _tkp in _tk_anchored:
+                        _tpos: Optional[int] = None
+                        _tel = soup.find(id=_tka) if soup else None
+                        if _tel:
+                            for _join_ch in ("\n", " "):
+                                _tet = _tel.get_text(_join_ch).strip()
+                                if _tet and len(_tet) >= 10:
+                                    _tpos = anchors_text.find(_tet)
+                                    if _tpos is not None and _tpos >= 0:
+                                        break
+                        if (_tpos is not None and _tpos >= 0
+                                and _tpos > _defs_pos + 2000):
+                            _tail_start = int(_tpos)
+                            break
+
+                    if _tail_start is not None:
+                        _tail_text = anchors_text[_tail_start:]
+                        if len(_tail_text) >= 200:
+                            # Use the full tail as prose — the TOC guarantees a
+                            # chapter boundary here, so infer_notes_split (which
+                            # is designed for the file-level split) would falsely
+                            # treat the following prose as notes.
+                            _tail_anchors = _extract_anchors_from_text(_tail_text)
+                            _tail_anchors = _filter_anchors_by_profile(
+                                _tail_anchors, allowed_categories
+                            )
+                            # Also extract HTML-based anchors from the tail portion
+                            # of the soup — anchors whose element appears after the
+                            # TOC boundary element in the soup document order.
+                            if soup is not None and _tail_start >= 0:
+                                try:
+                                    # Find the PART TWO anchor element and collect all
+                                    # <a> tags that appear after it in document order.
+                                    _tail_el = soup.find(id=_tka)
+                                    if _tail_el is not None:
+                                        _all_a = list(soup.find_all("a", href=True))
+                                        _after_tail: List[int] = []
+                                        _past = False
+                                        for _idx, _a in enumerate(_all_a):
+                                            if not _past:
+                                                if _a is _tail_el or _a in _tail_el.descendants:
+                                                    _past = True
+                                                    continue
+                                                if _tail_el in list(_a.parents):
+                                                    _past = True
+                                                    continue
+                                            if _past:
+                                                _after_tail.append(_idx)
+                                        if _after_tail:
+                                            _soup_anchors = _extract_anchors_from_soup(soup)
+                                            # Map soup anchor index → anchor dict using href matching.
+                                            _href_to_anchors: Dict[str, List[Dict[str, Any]]] = {}
+                                            for _sa in (_soup_anchors or []):
+                                                _sh = _safe_text(_sa.get("href") or "")
+                                                if _sh:
+                                                    _href_to_anchors.setdefault(_sh, []).append(_sa)
+                                            _soup_tail: List[Dict[str, Any]] = []
+                                            for _a_idx in _after_tail:
+                                                _ah = _safe_text(_all_a[_a_idx].get("href") or "")
+                                                for _sa2 in _href_to_anchors.get(_ah, []):
+                                                    _soup_tail.append(dict(_sa2))
+                                            if _soup_tail:
+                                                _soup_tail = _filter_anchors_by_profile(
+                                                    _soup_tail, allowed_categories
+                                                )
+                                                for _sa in _soup_tail:
+                                                    # Ensure position is at or past the tail
+                                                    # boundary so per-result assignment puts
+                                                    # them in the correct chapter.
+                                                    _sp = _sa.get("position")
+                                                    if not isinstance(_sp, int) or _sp < _tail_start:
+                                                        _sa["position"] = _tail_start
+                                                _tail_anchors.extend(_soup_tail)
+                                except Exception:
+                                    pass
+                            # Shift positions into anchors_text coordinates.
+                            for _ta in _tail_anchors:
+                                _ta["position"] = _ta.get("position", 0) + _tail_start
+
+                            # Targeted bare-digit extraction for markers 1–9 in the
+                            # tail.  The standard _extract_anchors_from_text misses
+                            # these because _marker_regex() only matches [1], (1),
+                            # unicode superscripts, and symbols — not bare digits.
+                            # Only search for digits whose definitions exist (were
+                            # harvested in Pass 1) to minimise false positives.
+                            _bare_digits_needed = sorted(
+                                {int(mk)
+                                 for mk in (list(global_defs_by_marker.keys())
+                                            + [d.get("marker", "") for d in definitions])
+                                 if isinstance(mk, str) and re.fullmatch(r"[1-9]", mk.strip())},
+                            )
+                            if _bare_digits_needed:
+                                _existing_nums = {
+                                    int((a.get("marker") or "0").strip())
+                                    for a in _tail_anchors
+                                    if re.fullmatch(r"\d{1,3}", (a.get("marker") or "").strip())
+                                }
+                                _missing = [n for n in _bare_digits_needed if n not in _existing_nums]
+                                if _missing:
+                                    for _m in re.finditer(
+                                        r"(?:^|\n)\s*(\d{1,3})\s*(?:\n|$)",
+                                        _tail_text,
+                                        re.MULTILINE,
+                                    ):
+                                        _bd = _m.group(1).strip()
+                                        try:
+                                            if int(_bd) not in _missing:
+                                                continue
+                                        except ValueError:
+                                            continue
+                                        _bstart = max(0, _m.start(1) - 80)
+                                        _bend = min(len(_tail_text), _m.end(1) + 80)
+                                        _bctx = _tail_text[_bstart:_bend]
+                                        if not anchor_is_probable_footnote(
+                                            _bd, _bd, _bctx, has_href=False
+                                        ):
+                                            continue
+                                        _tail_anchors.append(
+                                            {
+                                                "marker_raw": _bd,
+                                                "marker": _bd,
+                                                "position": _m.start(1) + _tail_start,
+                                                "context": _bctx,
+                                                "_has_href": False,
+                                            }
+                                        )
+
+                            if _tail_anchors:
+                                _tail_results, next_id = _pair_anchors_to_definitions(
+                                    _tail_anchors,
+                                    definitions,
+                                    source_meta,
+                                    definitions_by_id=global_defs_by_id,
+                                    id_start=next_id,
+                                )
+                                if _tail_results:
+                                    results.extend(_tail_results)
+            except Exception:
+                pass
+
         # If this spine item contains multiple chapter headings, assign each result
         # to the nearest preceding heading based on its anchor position.
         # For malformed EPUBs, a spine item can continue a chapter and then start
@@ -3614,6 +3823,181 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         if headings:
             first_heading_pos = headings[0][0]
             first_heading_label = headings[0][1]
+
+            # ── TOC-driven chapter heading map ───────────────────────────
+            # When the NCX TOC is high-quality, build a toc_headings list of
+            # (anchors_text_offset, toc_label) pairs from the TOC leaf entries.
+            # Structural heading entries (navPoints with children) are only
+            # kept when they have their own content (markers in the gap
+            # between the heading anchor and the first child anchor).
+            toc_headings: Optional[List[Tuple[int, str]]] = None
+            if toc_is_high_quality and toc_anchors_by_file:
+                _ch_file_key = (source_meta.get("chapter_name") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+                _entries = toc_anchors_by_file.get(_ch_file_key, [])
+                # All entries:  (anchor, label, is_heading, parent_anchor)
+                _anchored = [(a, l, h, p) for (a, l, h, p) in _entries if a]
+
+                if len(_anchored) >= 2:
+                    # Compute soup text-node offsets (for gap calculation).
+                    _soup_offsets: Dict[str, int] = {}
+                    try:
+                        _text_nodes = soup.find_all(string=True)
+                        _cum = 0
+                        _id_to_offset: Dict[str, int] = {}
+                        for _tn in _text_nodes:
+                            _parent = _tn.parent
+                            while _parent is not None:
+                                _pid = _parent.get("id")
+                                if _pid and _pid not in _id_to_offset:
+                                    _id_to_offset[_pid] = _cum
+                                _parent = _parent.parent
+                            _cum += len(str(_tn))
+                        _soup_offsets = _id_to_offset
+                    except Exception:
+                        _soup_offsets = {}
+
+                    # Separate heading entries from leaf entries.
+                    _heading_entries = [(a, l) for (a, l, h, p) in _anchored if h]
+                    _leaf_entries = [(a, l) for (a, l, h, p) in _anchored if not h]
+
+                    # Determine which headings to keep based on gap + markers.
+                    _kept_headings: List[Tuple[str, str]] = []
+                    for _ha, _hl in _heading_entries:
+                        _hpos_soup = _soup_offsets.get(_ha)
+                        # Find the first same-file child of this heading.
+                        _children = [(a, l) for (a, l, h, p) in _anchored
+                                     if not h and p == _ha]
+                        if not _children:
+                            # No same-file children → heading stands alone → keep.
+                            _kept_headings.append((_ha, _hl))
+                            continue
+                        _ch_a, _ch_l = _children[0]
+                        _cpos_soup = _soup_offsets.get(_ch_a)
+                        if _hpos_soup is not None and _cpos_soup is not None:
+                            _gap = _cpos_soup - _hpos_soup
+                            if _gap < 1000:
+                                # Small gap — check for markers between heading and child.
+                                _has_gap_markers = any(
+                                    isinstance(a.get("position"), int)
+                                    and _hpos_soup <= a.get("position") <= _cpos_soup
+                                    for a in (deduped or [])
+                                )
+                                if not _has_gap_markers:
+                                    # Empty heading with no content → skip.
+                                    continue
+                        # Keep the heading (has own content or substantial gap).
+                        _kept_headings.append((_ha, _hl))
+
+                    # Combine kept headings + leaves.
+                    _final_entries = _kept_headings + _leaf_entries
+                    if len(_final_entries) >= 2:
+                        toc_headings = []
+                        for _fa, _fl in _final_entries:
+                            _pos: Optional[int] = None
+                            # Find position in anchors_text.  Try multiple strategies:
+                            #  1) element text via newline-joined get_text (matches
+                            #     soup.get_text("\n") which is the basis of anchors_text)
+                            #  2) element text via space-joined get_text
+                            #  3) fallback word-overlap match against heuristic headings
+                            try:
+                                _el = soup.find(id=_fa)
+                                if _el:
+                                    for _join_char in ("\n", " "):
+                                        _etxt = _el.get_text(_join_char).strip()
+                                        if _etxt and len(_etxt) >= 10:
+                                            _pos = anchors_text.find(_etxt)
+                                            if _pos is not None and _pos >= 0:
+                                                break
+                                    if _pos is not None and _pos >= 0:
+                                        pass  # found via text search
+                                    else:
+                                        # Text too short or not found — try shorter key text.
+                                        _etxt_short = _el.get_text(" ").strip()
+                                        if _etxt_short and len(_etxt_short) >= 6:
+                                            _pos = anchors_text.find(_etxt_short)
+                            except Exception:
+                                _pos = None
+                            # Fallback: match to a heuristic heading by word overlap.
+                            if _pos is None or _pos < 0:
+                                _fl_up = re.sub(r"[^A-Z0-9\s]", "", _fl.upper())
+                                _fl_w = {w for w in _fl_up.split() if len(w) >= 2}
+                                for _hp, _hlb in headings:
+                                    _hlb_up = re.sub(r"[^A-Z0-9\s]", "", (_safe_text(_hlb) or "").upper())
+                                    _hlb_w = {w for w in _hlb_up.split() if len(w) >= 2}
+                                    if len(_fl_w & _hlb_w) >= 2:
+                                        _pos = int(_hp)
+                                        break
+                            if _pos is not None and _pos >= 0:
+                                toc_headings.append((int(_pos), _fl))
+                        if toc_headings:
+                            toc_headings.sort(key=lambda t: t[0])
+                            first_heading_pos = toc_headings[0][0]
+                            first_heading_label = toc_headings[0][1]
+
+            # ── Per-TOC-region soup anchor recovery ──────────────────
+            # When a file spans multiple TOC chapters, soup-based anchors
+            # (e.g. <sup><a href="...">1</a></sup>) may not have accurate
+            # positions in anchors_text coordinates.  Re-extract soup
+            # anchors and assign positions by finding their context text
+            # in the appropriate TOC sub-region of anchors_text.
+            if toc_headings and len(toc_headings) >= 2:
+                try:
+                    _all_soup = _extract_anchors_from_soup(soup)
+                    _all_soup = _filter_anchors_by_profile(
+                        _all_soup, allowed_categories
+                    )
+                    if _all_soup:
+                        _soup_added: set[str] = set()
+                        for _i, (_pos_i, _lbl_i) in enumerate(toc_headings):
+                            _pos_next = (toc_headings[_i + 1][0]
+                                         if _i + 1 < len(toc_headings)
+                                         else len(anchors_text))
+                            _region = anchors_text[_pos_i:_pos_next]
+                            if len(_region) < 80:
+                                continue
+                            for _sa in _all_soup:
+                                _sm = _sa.get("marker", "")
+                                _sctx = _sa.get("context", "")
+                                if not _sm or not _sctx:
+                                    continue
+                                _key = "%s|%s|%d" % (_sm, _sctx[:40], _pos_i)
+                                if _key in _soup_added:
+                                    continue
+                                _prefix_len = 40 if len(_sctx) < 120 else 80
+                                _sctx_pos = _region.replace("\n", " ").find(
+                                    _sctx.replace("\n", " ")[:_prefix_len]
+                                )
+                                _sa_copy = dict(_sa)
+                                if _sctx_pos >= 0:
+                                    _sa_copy["position"] = _pos_i + _sctx_pos
+                                else:
+                                    continue
+                                _soup_added.add(_key)
+                                # Pair this anchor individually.
+                                _single, _nid = _pair_anchors_to_definitions(
+                                    [_sa_copy],
+                                    definitions,
+                                    source_meta,
+                                    definitions_by_id=global_defs_by_id,
+                                    id_start=next_id,
+                                )
+                                if _single:
+                                    # Only add markers not already represented in results.
+                                    for _sr in _single:
+                                        _sr_mk = _sr.get("marker", "")
+                                        _sr_pos = _sr.get("position")
+                                        _dup = any(
+                                            r.get("marker") == _sr_mk
+                                            and isinstance(r.get("position"), int)
+                                            and isinstance(_sr_pos, int)
+                                            and abs(r.get("position", 0) - _sr_pos) < 500
+                                            for r in results
+                                        )
+                                        if not _dup:
+                                            results.append(_sr)
+                                    next_id = _nid
+                except Exception:
+                    pass
 
             min_numeric_after_heading: Optional[int] = None
             try:
@@ -3655,7 +4039,10 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         if fhl and pcl and fhl != pcl:
                             chosen = first_heading_label
                 else:
-                    for hpos, hlabel in headings:
+                    # When we have TOC-derived headings, use those for label assignment
+                    # so results get the correct TOC-supplied chapter name.
+                    _source_headings = toc_headings if toc_headings else headings
+                    for hpos, hlabel in _source_headings:
                         if hpos <= pos:
                             chosen = hlabel
                         else:
@@ -3663,8 +4050,12 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 if chosen:
                     chosen = _strip_trailing_footnote_marker_from_heading(chosen) or chosen
                     # When the TOC is high-quality, only reassign chapter_label from local
-                    # headings when this file does NOT already have a TOC-derived label.
-                    if not (st_rst_convention and toc_is_high_quality) or toc_label is None:
+                    # headings when this file does NOT already have a TOC-derived label,
+                    # OR when the file spans multiple TOC entries (sub-chapter boundaries).
+                    _chapter_file_key = (source_meta.get("chapter_name") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+                    _toc_anchored = [(a, l) for (a, l, *_rest) in toc_anchors_by_file.get(_chapter_file_key, []) if a]
+                    _has_multi_toc = bool(toc_anchors_by_file and len(_toc_anchored) >= 2)
+                    if not toc_is_high_quality or toc_label is None or _has_multi_toc:
                         r["chapter_label"] = chosen
                         r["chapter_group"] = _chapter_group_key(chosen)
 
@@ -3674,18 +4065,35 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
             # not whatever heading appeared earlier in the previous doc.
             #
             # When a high-quality TOC is active, only advance the context when this file
-            # does NOT already have a TOC-derived label (advancing is handle by
-            # current_chapter_label set from toc_label earlier).
-            if not (st_rst_convention and toc_is_high_quality) or toc_label is None:
+            # does NOT already have a TOC-derived label (advancing is handled by
+            # current_chapter_label set from toc_label earlier), OR when the file spans
+            # multiple TOC entries (different sub-chapters within one spine item).
+            _chapter_file_key2 = (source_meta.get("chapter_name") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+            _has_multi_toc2 = bool(
+                toc_anchors_by_file
+                and len([(a, l) for (a, l, *_rest) in toc_anchors_by_file.get(_chapter_file_key2, []) if a]) >= 2
+            )
+            if not toc_is_high_quality or toc_label is None or _has_multi_toc2:
                 carry_label = None
                 try:
-                    for _hpos, hlabel in headings:
-                        cleaned = _strip_trailing_footnote_marker_from_heading(hlabel) or hlabel
-                        if _extract_chapter_token(cleaned) is not None:
-                            carry_label = cleaned
+                    # Prefer the last TOC entry label when this file spans multiple
+                    # TOC sections (e.g. "The Notion Club Papers Part Two").
+                    # Use toc_headings if available (already filtered for
+                    # empty headings); otherwise fall back to raw TOC entries.
+                    if toc_headings:
+                        carry_label = toc_headings[-1][1]
+                    elif _has_multi_toc2:
+                        toc_list = [(a, l) for (a, l, *_rest) in toc_anchors_by_file.get(_chapter_file_key2, []) if a]
+                        if toc_list:
+                            carry_label = toc_list[-1][1]
                     if not carry_label:
-                        last_label = headings[-1][1]
-                        carry_label = _strip_trailing_footnote_marker_from_heading(last_label) or last_label
+                        for _hpos, hlabel in headings:
+                            cleaned = _strip_trailing_footnote_marker_from_heading(hlabel) or hlabel
+                            if _extract_chapter_token(cleaned) is not None:
+                                carry_label = cleaned
+                        if not carry_label:
+                            last_label = headings[-1][1]
+                            carry_label = _strip_trailing_footnote_marker_from_heading(last_label) or last_label
                 except Exception:
                     carry_label = None
 
@@ -4069,7 +4477,11 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     # headings (e.g., "C. OMMENTARY") from overriding proper labels.
                     try:
                         orphan_file_key = (source_meta.get("chapter_name") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
-                        if not (st_rst_convention and toc_is_high_quality) or toc_label is None:
+                        _orphan_has_multi_toc = bool(
+                            toc_anchors_by_file
+                            and len([(a, l) for (a, l, *_rest) in toc_anchors_by_file.get(orphan_file_key, []) if a]) >= 2
+                        )
+                        if not toc_is_high_quality or toc_label is None or _orphan_has_multi_toc:
                             chosen = None
                             for hpos, hlabel in local_heads:
                                 if isinstance(hpos, int) and hpos <= pos:
