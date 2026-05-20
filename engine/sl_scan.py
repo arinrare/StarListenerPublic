@@ -794,14 +794,22 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
         return False
 
-    def _parse_toc_chapter_map() -> Tuple[Dict[str, str], bool]:
-        """Parse toc.ncx to extract a file→chapter-label map from the navMap.
+    def _parse_toc_chapter_map() -> Tuple[Dict[str, str], Dict[str, List[Tuple[str, Optional[str]]]], bool]:
+        """Parse toc.ncx to extract chapter label information from the navMap.
 
         Returns:
-          (file_to_label: dict mapping file basename → chapter label, is_high_quality: bool)
+          (file_to_label, toc_file_entries, is_high_quality)
+
+          file_to_label: dict mapping file basename → first chapter label (existing contract)
+          toc_file_entries: dict mapping file basename → [(label, anchor_fragment), ...]
+            for ALL TOC entries per file. Anchor fragment may be None when the TOC src
+            has no #anchor. This is used for per-anchor position-based chapter splitting
+            when a single file contains multiple TOC entries.
+          is_high_quality: bool
         """
 
         file_to_label: Dict[str, str] = {}
+        toc_file_entries: Dict[str, List[Tuple[str, Optional[str]]]] = defaultdict(list)
         try:
             toc_item = book.get_item_with_href("toc.ncx") or book.get_item_with_id("ncx")
             if toc_item is None:
@@ -811,7 +819,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         toc_item = it
                         break
             if toc_item is None:
-                return file_to_label, False
+                return file_to_label, toc_file_entries, False
 
             toc_xml = toc_item.get_content()
             toc_text = toc_xml.decode("utf-8", errors="ignore") if isinstance(toc_xml, bytes) else str(toc_xml)
@@ -836,8 +844,11 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 if not label or not src:
                     continue
 
-                # Extract the file basename from src (strip anchor fragment).
+                # Extract the file basename and anchor fragment from src.
                 file_part = src.split("#")[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+                anchor_frag: Optional[str] = None
+                if "#" in src:
+                    anchor_frag = src.split("#", 1)[1].strip() or None
 
                 # Count non-trivial, non-frontmatter labels as high-quality.
                 label_lower = label.lower().strip()
@@ -849,15 +860,17 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 ):
                     valid_labels += 1
 
-                # Only map file if not already mapped (first navPoint wins for each file).
+                # Map file → first label (existing flat mapping).
                 if file_part not in file_to_label:
                     file_to_label[file_part] = label
+                # Map file → all (label, anchor) entries (new; for multi-entry splitting).
+                toc_file_entries[file_part].append((label, anchor_frag))
 
             is_high_quality = valid_labels >= 5 and (total_points < 1 or valid_labels / max(1, total_points) >= 0.25)
-            return file_to_label, is_high_quality
+            return file_to_label, toc_file_entries, is_high_quality
 
         except Exception:
-            return file_to_label, False
+            return file_to_label, toc_file_entries, False
 
     def _items_in_spine_order() -> List[Any]:
         """Return EPUB document items in spine (reading) order.
@@ -920,35 +933,67 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
     all_results: list[dict] = []
     next_id = 0
 
-    # Detect well-structured EPUBs that use the st{N}/rst{N} bidirectional footnote convention
-    # (common in calibre-produced scholarly editions). When detected, we can skip AI calls
-    # and use explicit HTML DOM pairing directly.
-    st_rst_convention = False
-    st_rst_anchor_count = 0
+    # Detect well-structured EPUBs that use explicit bidirectional HTML footnote links.
+    # When an EPUB consistently has <a> tags in prose linking to definition elements via
+    # explicit ID fragments (any naming scheme), we can skip AI calls and trust the
+    # HTML DOM for pairing. This is pattern-agnostic — it catches st/rst, c_rfn, fn{N},
+    # pt4en{N}, filepos{N}, and any future convention automatically.
+    structured_footnote_epub = False
+    _st_rst_convention = False  # kept narrow for st/rst-specific harvest code
     st_rst_rst_id_map: Dict[str, str] = {}  # rst-id -> definition text
     st_rst_st_anchors: Dict[str, Dict[str, Any]] = {}  # st-id -> anchor info
     st_rst_global_defs: Dict[str, Dict[str, Any]] = {}  # rst-id -> full definition info
     _st_id_re = re.compile(r"^st(\d+)([a-z]?)$", re.IGNORECASE)
     _rst_id_re = re.compile(r"^rst(\d+)([a-z]?)$", re.IGNORECASE)
     try:
-        sample_count = len(items)  # scan all items — footnote files may be at spine end
-        # Direction 1 (Book 11): anchor=st{N}, def=rst{N} in class=footnote
-        total_st_anchors = 0
-        total_rst_defs = 0
-        has_footnote_class = False
-        # Direction 2 (Book 12): anchor=rst{N}, def=st{N} in separate files
-        total_rst_anchors = 0
-        total_st_defs = 0
-        has_separate_footnote_files = False
-        for it in items[:sample_count]:
+        # --- Phase 1: Collect all element IDs across the entire EPUB ---
+        all_elem_ids: set[str] = set()
+        for it in items:
             try:
-                name = (getattr(it, "get_name", lambda: "")() if hasattr(it, "get_name") else "").lower()
-                if "footnote" in name or "endnote" in name:
-                    has_separate_footnote_files = True
                 html_content = it.get_content()
                 html_text = html_content.decode("utf-8", errors="ignore") if isinstance(html_content, bytes) else str(html_content)
                 probe_soup = BeautifulSoup(html_text, "html.parser")
-                # Count st{N} anchor tags (Book 11 direction).
+                for tag in probe_soup.find_all(True):
+                    tid = _safe_text(tag.get("id") or "").strip()
+                    if tid:
+                        all_elem_ids.add(tid)
+            except Exception:
+                continue
+
+        # --- Phase 2: Count bidirectional footnote links ---
+        # A "bidirectional footnote link" is an <a> tag whose href fragment points to
+        # an element ID we found elsewhere in the EPUB, AND whose visible text is small
+        # (a typical footnote marker like "1", "*", "a" — not a TOC/chapter title).
+        total_bidi_anchors = 0
+        total_bidi_defs = 0
+        referenced_def_ids: set[str] = set()
+        anchor_files_with_bidi: set[int] = set()
+        _small_marker_re = re.compile(r"^\s*[\(\[]?\s*(?:\d{1,3}|\*|\u2020|\u2021|\u00a7|[a-zA-Z])\s*[\)\]]?\s*$", re.UNICODE)
+
+        for idx, it in enumerate(items):
+            try:
+                html_content = it.get_content()
+                html_text = html_content.decode("utf-8", errors="ignore") if isinstance(html_content, bytes) else str(html_content)
+                probe_soup = BeautifulSoup(html_text, "html.parser")
+
+                # Count bidirectional anchors.
+                for a in probe_soup.find_all("a"):
+                    href = _safe_text(a.get("href") or "").strip()
+                    if "#" not in href:
+                        continue
+                    if href.lower().startswith("http://") or href.lower().startswith("https://"):
+                        continue
+                    frag = href.rsplit("#", 1)[1].strip()
+                    if frag not in all_elem_ids:
+                        continue
+                    txt = _safe_text(a.get_text(" ")).strip()
+                    if not _small_marker_re.match(txt):
+                        continue
+                    total_bidi_anchors += 1
+                    referenced_def_ids.add(frag)
+                    anchor_files_with_bidi.add(int(idx))
+
+                # Count st{N}/rst{N} anchors (for the narrow st/rst harvest path).
                 for a in probe_soup.find_all("a"):
                     aid = _safe_text(a.get("id") or "").strip()
                     if _st_id_re.match(aid):
@@ -956,60 +1001,151 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         if "#" in href:
                             frag = href.rsplit("#", 1)[1].strip()
                             if _rst_id_re.match(frag):
-                                total_st_anchors += 1
-                    # Count rst{N} anchor tags (Book 12 direction).
+                                _st_rst_convention = True
                     if _rst_id_re.match(aid):
                         href = _safe_text(a.get("href") or "").strip()
                         if "#" in href:
                             frag = href.rsplit("#", 1)[1].strip()
                             if _st_id_re.match(frag):
-                                total_rst_anchors += 1
-                # Count rst{N} definitions with footnote class (Book 11).
-                for p in probe_soup.select(".footnote, .footnotet"):
-                    has_footnote_class = True
+                                _st_rst_convention = True
+
+                # Count footnote-class definition elements with IDs.
+                for p in probe_soup.select(".footnote, .footnotet, .noindent-x1"):
                     pid = _safe_text(p.get("id") or "").strip()
-                    if _rst_id_re.match(pid):
-                        total_rst_defs += 1
-                # Count st{N} definitions in any block element (Book 12 separate files).
-                for p in probe_soup.find_all(["p", "div", "li"]):
-                    pid = _safe_text(p.get("id") or "").strip()
-                    if _st_id_re.match(pid):
-                        # Must contain a back-link to a chapter anchor.
-                        for a_inner in p.find_all("a"):
-                            ihref = _safe_text(a_inner.get("href") or "").strip()
-                            if "#" in ihref:
-                                ifrag = ihref.rsplit("#", 1)[1].strip()
-                                if _rst_id_re.match(ifrag):
-                                    total_st_defs += 1
-                                    break
+                    if pid and pid in referenced_def_ids:
+                        total_bidi_defs += 1
+
+                # Also count any element whose ID was referenced by an anchor above.
+                for tag in probe_soup.find_all(True):
+                    tid = _safe_text(tag.get("id") or "").strip()
+                    if tid and tid in referenced_def_ids:
+                        total_bidi_defs += 1
             except Exception:
                 continue
-        # Convention is active if EITHER direction has enough evidence.
-        direction1 = total_st_anchors >= 3 and total_rst_defs >= 2 and has_footnote_class
-        direction2 = total_rst_anchors >= 3 and total_st_defs >= 2 and has_separate_footnote_files
-        st_rst_convention = direction1 or direction2
-    except Exception:
-        st_rst_convention = False
 
-    # When the st/rst convention is detected, the EPUB is well-structured —
+        # --- Phase 3: Threshold check ---
+        # Convention is active when we see at least 10 bidirectional footnote links
+        # spread across at least 3 different spine items.
+        structured_footnote_epub = (
+            total_bidi_anchors >= 10
+            and total_bidi_defs >= 5
+            and len(anchor_files_with_bidi) >= 3
+        )
+    except Exception:
+        structured_footnote_epub = False
+        _st_rst_convention = False
+
+    # When a structured footnote convention is detected, the EPUB is well-structured —
     # all real footnotes have explicit HTML links. Disable ALL AI calls globally
     # for the duration of this scan. Using the env var blocks at the lowest level
     # (_call_ai), catching even unguarded paths like _ai_disambiguate_pairs.
     _saved_ai_disabled = os.environ.get("STARLISTENER_AI_DISABLED")
     _ai_was_disabled = False
-    if st_rst_convention and _saved_ai_disabled != "1":
+    if structured_footnote_epub and _saved_ai_disabled != "1":
         os.environ["STARLISTENER_AI_DISABLED"] = "1"
         _ai_was_disabled = True
 
     # Parse the TOC for chapter structure. A high-quality TOC provides chapter labels
     # and boundaries that are more reliable than text-based heuristics.
-    toc_file_to_label, toc_is_high_quality = _parse_toc_chapter_map()
+    toc_file_to_label, toc_file_entries, toc_is_high_quality = _parse_toc_chapter_map()
+
+    def _resolve_toc_anchor_positions(
+        entries: List[Tuple[str, Optional[str]]],
+        soup: BeautifulSoup,
+        lines: List[str],
+    ) -> List[Tuple[str, int]]:
+        """Resolve TOC anchor fragments to character positions in the text.
+
+        For each (label, anchor_fragment) in `entries`, finds the DOM element
+        with that ID, inserts a token at that position, then finds the token in
+        a fresh text derived from the modified soup. This avoids the stale-text
+        problem where anchors_text was computed before token insertion.
+
+        Returns a sorted list of (label, char_position) boundaries.
+
+        Entries whose anchor_fragment is None or whose element is not found
+        are silently skipped.
+        """
+        boundaries: List[Tuple[str, int]] = []
+        if not entries or not soup:
+            return boundaries
+
+        token_tpl = "\uE002TOC{idx:06d}\uE003"
+        token_len = len(token_tpl.format(idx=0))
+        token_counter = 0
+        label_map: Dict[str, str] = {}  # token → label
+
+        # Copy soup so tokens don't affect downstream parsing.
+        soup2 = BeautifulSoup(str(soup), "html.parser")
+
+        for label, anchor_frag in entries:
+            if not anchor_frag:
+                continue
+            tag = soup2.find(id=anchor_frag)
+            if not tag:
+                continue
+            tok = token_tpl.format(idx=token_counter)
+            token_counter += 1
+            try:
+                tag.insert_before(tok)
+            except Exception:
+                continue
+            label_map[tok] = label
+
+        if not label_map:
+            return boundaries
+
+        # Recompute text from the token-instrumented soup.
+        try:
+            from sl_utility import _preprocess_for_notes, _clean_line_for_parsing  # type: ignore
+        except ModuleNotFoundError:  # pragma: no cover
+            from .sl_utility import _preprocess_for_notes, _clean_line_for_parsing  # type: ignore
+
+        chapter_text_instr = _preprocess_for_notes(soup2.get_text("\n"))
+        tok_lines = [_clean_line_for_parsing(l.rstrip("\r")) for l in chapter_text_instr.split("\n")]
+        anchors_text_instr = "\n".join(tok_lines)
+
+        for tok, label in label_map.items():
+            j = anchors_text_instr.find(tok)
+            if j == -1:
+                continue
+            corrected = int(j - (boundaries.__len__() * token_len))
+            if corrected < 0:
+                corrected = 0
+            boundaries.append((label, corrected))
+
+        boundaries.sort(key=lambda kv: kv[1])
+        return boundaries
+
+    def _label_by_toc_position(
+        boundaries: List[Tuple[str, int]],
+        pos: Any,
+    ) -> Optional[str]:
+        """Return the TOC label that applies at the given character position.
+
+        Boundaries are sorted by character position. The label at or after `pos`
+        is the label for that position. If `pos` is before the first boundary,
+        returns None (caller should use the inherited/carried context).
+        """
+        if not boundaries or not isinstance(pos, (int, float)):
+            return None
+        ipos = int(pos)
+        if ipos < 0:
+            return None
+        # Find the last boundary whose position is <= ipos.
+        label = None
+        for lbl, bpos in boundaries:
+            if int(bpos) <= ipos:
+                label = lbl
+            else:
+                break
+        return _strip_trailing_footnote_marker_from_heading(label) or label if label else None
 
     # Decide marker profile once per book (used to suppress obviously-wrong marker families).
     effective_profile = (options.marker_profile or "auto_heur").strip().lower()
     if effective_profile in {"auto", "auto_heur", "auto_ai"}:
-        if st_rst_convention:
-            # Well-structured EPUB with explicit st/rst links -- no AI needed.
+        if structured_footnote_epub:
+            # Well-structured EPUB with explicit footnote links — no AI needed.
             effective_profile = "auto_heur"
         else:
             sample_text_parts: List[str] = []
@@ -1220,7 +1356,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
         # st/rst convention: harvest explicit st{N} anchors and rst{N} footnote definitions.
         # For well-formed EPUBs this gives us direct anchor-definition pairs with no heuristics.
-        if st_rst_convention:
+        if _st_rst_convention:
             rst_id_map, st_anchors_from_item, rst_defs_from_item = _harvest_st_rst_footnotes(soup)
             for rst_id, txt in rst_id_map.items():
                 if rst_id and txt:
@@ -1358,7 +1494,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
             defs = _extract_definitions_from_lines_scoped(lines, split.defs_start_index, initial_chapter_token=notes_chapter_token)
         elif looks_like_notes:
             # Auto-AI: if we couldn't split, ask AI to locate the notes header.
-            if (options.marker_profile or "").strip().lower() == "auto_ai" and not st_rst_convention:
+            if (options.marker_profile or "").strip().lower() == "auto_ai" and not structured_footnote_epub:
                 ai_split = _ai_infer_notes_split(lines)
                 if ai_split is not None:
                     _, ai_defs_start = ai_split
@@ -1557,23 +1693,26 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         structured_note_id_map, structured_note_defs = _harvest_structured_notes_section_targets(soup)
         structured_note_defs = _filter_definitions_by_profile(structured_note_defs, allowed_categories)
 
-        # When the st/rst convention is active, skip AI inference and use HTML structure directly.
-        # If this spine item has class="footnote" definitions but no st anchors in prose,
+        # When a structured footnote convention is active, skip AI inference and use
+        # HTML structure directly. If this spine item has class="footnote" definitions
+        # but no prose anchor links (small-marker <a> tags with href fragments),
         # it's a pure footnote-definition page -- skip it (defs already harvested in Pass 1).
-        if st_rst_convention:
+        if structured_footnote_epub:
             has_footnote_defs = bool(soup.select(".footnote, .footnotet, .noindent-x1"))
-            has_st_anchors_here = any(
-                _st_id_re.match(_safe_text(a.get("id") or ""))
+            _small_marker_skip_re = re.compile(r"^\s*(?:\d{1,3}|\*|\u2020|\u2021|\u00a7|[a-zA-Z])\s*$", re.UNICODE)
+            has_prose_anchors = any(
+                _small_marker_skip_re.match(_safe_text(a.get_text(" ")).strip())
+                and "#" in _safe_text(a.get("href") or "").strip()
                 for a in soup.find_all("a")
             )
-            if has_footnote_defs and not has_st_anchors_here and len(_safe_text(chapter_text)) < 400:
+            if has_footnote_defs and not has_prose_anchors and len(_safe_text(chapter_text)) < 400:
                 continue
 
         split = infer_notes_split(lines)
         if split is None:
             if (options.marker_profile or "").strip().lower() == "auto_ai":
-                # Skip AI notes split when st/rst convention is active.
-                if st_rst_convention:
+                # Skip AI notes split when structured convention is active.
+                if structured_footnote_epub:
                     ai_split = None
                 else:
                     ai_split = _ai_infer_notes_split(lines)
@@ -1749,9 +1888,9 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
         # Build section labels when multiple NOTES blocks exist in one spine item.
         # Use globally-assigned numbered labels: "NOTES Section 1", "NOTES Section 2", etc.
-        # Only active for books where the st/rst convention is detected.
+        # Only active for books where a structured convention is detected.
         multi_section_labels: Optional[List[str]] = None
-        if st_rst_convention and multi_notes_blocks:
+        if structured_footnote_epub and multi_notes_blocks:
             multi_section_labels = [
                 f"NOTES Section {block_idx + 1}"
                 for block_idx in range(len(multi_notes_blocks))
@@ -2039,10 +2178,17 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         # help identify chapter boundaries.
         label_lines = anchor_text.split("\n")
         toc_label: Optional[str] = None
-        if st_rst_convention and toc_is_high_quality:
-            chapter_file_key = (source_meta.get("chapter_name") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+        toc_boundaries: List[Tuple[str, int]] = []  # [(label, char_position), ...] sorted by position
+        chapter_file_key = (source_meta.get("chapter_name") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if structured_footnote_epub and toc_is_high_quality:
             if chapter_file_key in toc_file_to_label:
                 toc_label = toc_file_to_label[chapter_file_key]
+            # Build TOC boundary positions when the current file has multiple TOC entries.
+            toc_entries_for_file = toc_file_entries.get(chapter_file_key)
+            if toc_entries_for_file and len(toc_entries_for_file) >= 2:
+                toc_boundaries = _resolve_toc_anchor_positions(
+                    toc_entries_for_file, soup, lines
+                )
         if toc_label:
             inferred_label = toc_label
             soup_label = toc_label
@@ -2133,12 +2279,25 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
             inferred_label = _strip_trailing_footnote_marker_from_heading(inferred_label)
 
         # Determine if this item provides a chapter boundary we should trust.
-        # When the TOC is high-quality, only TOC-derived labels are allowed to
-        # change the chapter context. Heuristic labels from items not in the TOC
-        # (e.g., commentary pages split across spine items) should not override
-        # the inherited context from a TOC-mapped parent chapter.
+        # When structured_footnote_epub is active with a high-quality TOC:
+        #   - Files with a TOC entry use the TOC label.
+        #   - Files without a TOC entry normally inherit the previous label, BUT
+        #     when they contain strong internal headings (PART/BOOK/CHAPTER/roman),
+        #     allow those headings to set the chapter context. This handles spine
+        #     items that fall between TOC entries but still have clear boundaries.
         heuristic_label_is_plausible = bool(inferred_label and _label_is_plausible_chapter_label(inferred_label))
-        heuristic_blocked_by_toc = st_rst_convention and toc_is_high_quality and not toc_label
+        heuristic_blocked_by_toc = False
+        if structured_footnote_epub and toc_is_high_quality and not toc_label:
+            heuristic_blocked_by_toc = True
+            # Unblock when the file has strong structural headings.
+            if heuristic_label_is_plausible and inferred_label:
+                has_structural_heading = (
+                    _looks_like_structural_part_or_book_heading(inferred_label)
+                    or bool(re.match(r"^\s*CHAPTER\s+([IVXLC]{1,12}|\d{1,3})\b", str(inferred_label), re.IGNORECASE))
+                    or (_extract_chapter_token(str(inferred_label)) is not None)
+                )
+                if has_structural_heading:
+                    heuristic_blocked_by_toc = False
         use_heuristic_label = heuristic_label_is_plausible and not heuristic_blocked_by_toc
 
         if use_heuristic_label:
@@ -2275,6 +2434,20 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     structured_notes_authoritative = True
 
             if structured_notes_authoritative:
+                # Preserve anchors whose href fragments point to globally-known
+                # definition IDs (e.g., multi-file chapters where anchors live in
+                # one spine item but definitions in another). Without this, anchors
+                # like c12b_rfn1 (in part0024_split_000.html) pointing to definitions
+                # in part0024_split_002.html are silently dropped.
+                for a in soup_anchors:
+                    if a in structured_soup_anchors:
+                        continue
+                    href = _safe_text(a.get("href") or "")
+                    if "#" not in href:
+                        continue
+                    frag = href.rsplit("#", 1)[1].strip()
+                    if frag and frag in global_defs_by_id:
+                        structured_soup_anchors.append(a)
                 soup_anchors = structured_soup_anchors
                 definitions = [dict(d) for d in structured_note_defs]
 
@@ -2302,7 +2475,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 except Exception:
                     pass
 
-        regex_anchors = [] if (structured_notes_authoritative and soup_anchors) or st_rst_convention else _extract_anchors_from_text(anchors_text)
+        regex_anchors = [] if (structured_notes_authoritative and soup_anchors) or structured_footnote_epub else _extract_anchors_from_text(anchors_text)
 
         # If we inferred a notes definitions region, filter regex anchors that occur inside
         # that region. Definitions often contain cross-references like "pp. 21-2.(1)" which
@@ -2368,10 +2541,10 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         anchors = list(soup_anchors)
         anchors.extend(regex_anchors)
         # Add bare-digit anchors only for markers that exist in defs.
-        # When st/rst convention is active, skip bare-digit anchors — they are
+        # When structured convention is active, skip bare-digit anchors — they are
         # never real footnote markers in well-structured EPUBs.
         def_markers = [d.get("marker") for d in definitions if d.get("marker")]
-        bare_digit_anchors = [] if st_rst_convention else _extract_bare_digit_anchors_from_text(anchors_text, def_markers)
+        bare_digit_anchors = [] if structured_footnote_epub else _extract_bare_digit_anchors_from_text(anchors_text, def_markers)
         if bare_digit_anchors and mask is not None:
             try:
                 excluded, line_starts = mask
@@ -3662,21 +3835,33 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             break
                 if chosen:
                     chosen = _strip_trailing_footnote_marker_from_heading(chosen) or chosen
-                    # When the TOC is high-quality, only reassign chapter_label from local
-                    # headings when this file does NOT already have a TOC-derived label.
-                    if not (st_rst_convention and toc_is_high_quality) or toc_label is None:
+                    # When the TOC is high-quality, only reassign chapter_label when
+                    # this file has multiple TOC entries (use position-based lookup)
+                    # or when it has no TOC label at all (use heading-based lookup).
+                    # Single-TOC-entry files keep one label for the entire file.
+                    if toc_boundaries and len(toc_boundaries) >= 2:
+                        toc_pos = r.get("position")
+                        chosen_toc = _label_by_toc_position(toc_boundaries, toc_pos)
+                        if chosen_toc:
+                            r["chapter_label"] = chosen_toc
+                            r["chapter_group"] = _chapter_group_key(chosen_toc)
+                    elif not (structured_footnote_epub and toc_is_high_quality) or toc_label is None:
                         r["chapter_label"] = chosen
                         r["chapter_group"] = _chapter_group_key(chosen)
 
-            # Advance the carried chapter state to the last heading seen in this spine item.
-            # This is critical for malformed EPUBs where a chapter starts mid-spine and
-            # continues into the next spine doc: the next doc should inherit Chapter II,
-            # not whatever heading appeared earlier in the previous doc.
-            #
-            # When a high-quality TOC is active, only advance the context when this file
-            # does NOT already have a TOC-derived label (advancing is handle by
-            # current_chapter_label set from toc_label earlier).
-            if not (st_rst_convention and toc_is_high_quality) or toc_label is None:
+            # Advance the carried chapter state.
+            # - Multi-TOC-entry files: advance to the LAST TOC label so the next
+            #   spine item inherits the correct chapter (e.g., Part Two, not Part One).
+            # - Single-TOC-entry files: don't advance (label already set at file level).
+            # - Non-TOC files with high-quality TOC: don't advance (inherited context).
+            # - No TOC / low-quality TOC: advance via heading-based carry (existing behavior).
+            if toc_boundaries and len(toc_boundaries) >= 2:
+                last_toc_label = toc_boundaries[-1][0]
+                if last_toc_label:
+                    last_toc_label = _strip_trailing_footnote_marker_from_heading(last_toc_label) or last_toc_label
+                    current_chapter_label = last_toc_label
+                    current_chapter_group = _chapter_group_key(last_toc_label)
+            elif not (structured_footnote_epub and toc_is_high_quality) or toc_label is None:
                 carry_label = None
                 try:
                     for _hpos, hlabel in headings:
@@ -4063,13 +4248,17 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     r["position"] = int(pos)
 
                     # Re-assign chapter_label/group based on recovered position.
-                    # When the TOC is high-quality, only allow reassignment for files
-                    # that have a direct TOC mapping. Files without a TOC entry should
-                    # keep their inherited TOC context to prevent spurious heuristic
-                    # headings (e.g., "C. OMMENTARY") from overriding proper labels.
+                    # When the TOC is high-quality:
+                    #   - Multi-TOC-entry files: use position-based TOC lookup.
+                    #   - Single-TOC-entry files: keep the one label (no reassignment).
+                    #   - Non-TOC files: use heading-based lookup.
                     try:
-                        orphan_file_key = (source_meta.get("chapter_name") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
-                        if not (st_rst_convention and toc_is_high_quality) or toc_label is None:
+                        if toc_boundaries and len(toc_boundaries) >= 2:
+                            chosen_toc = _label_by_toc_position(toc_boundaries, pos)
+                            if chosen_toc:
+                                r["chapter_label"] = chosen_toc
+                                r["chapter_group"] = _chapter_group_key(chosen_toc)
+                        elif not (structured_footnote_epub and toc_is_high_quality) or toc_label is None:
                             chosen = None
                             for hpos, hlabel in local_heads:
                                 if isinstance(hpos, int) and hpos <= pos:
@@ -4239,7 +4428,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
         # When a spine item has multiple NOTES blocks, tag each result with
         # the section it belongs to by appending a numbered suffix.
-        if st_rst_convention and multi_section_labels and multi_notes_blocks and len(multi_section_labels) >= 2:
+        if structured_footnote_epub and multi_section_labels and multi_notes_blocks and len(multi_section_labels) >= 2:
             # Build char-position boundaries for each block.
             _sec_lbl_line_starts: List[int] = []
             _sec_lbl_run = 0
@@ -4520,10 +4709,10 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
     except Exception:
         pass
 
-    # When st/rst convention is active, the EPUB's footnote structure is explicit
-    # in the HTML DOM. Only id_link results (from explicit href/fragment pairs) are
-    # real footnotes. Drop all heuristic matches to prevent AI disambiguation.
-    if st_rst_convention:
+    # When a structured footnote convention is active, the EPUB's footnote structure
+    # is explicit in the HTML DOM. Only id_link results (from explicit href/fragment
+    # pairs) are real footnotes. Drop all heuristic matches to prevent AI disambiguation.
+    if structured_footnote_epub:
         filtered_results: list[dict] = []
         for r in all_results:
             if not isinstance(r, dict):
