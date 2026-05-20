@@ -322,15 +322,71 @@ def _flush_block(word_ts: list, start: int, end: int, blocks: list) -> None:
             })
 
 
+def _flush_passage(words: list, start: int, end: int, passages: list) -> None:
+    if start < end:
+        text = " ".join(words[start:end]).strip()
+        if text:
+            passages.append(text)
+
+
+def _split_text_into_passages(text: str, cap: int = 50, max_sentence: int = 80) -> list:
+    paragraphs = _split_natural_paragraphs(text)
+    passages = []
+
+    for para in paragraphs:
+        para = re.sub(r"\s+", " ", para).strip()
+        if not para:
+            continue
+        words = para.split()
+        if not words:
+            continue
+
+        block_start = 0
+        sentence_start = 0
+        block_wc = 0
+
+        for i, word in enumerate(words):
+            is_end = word.rstrip().endswith(('.', '!', '?'))
+            if not is_end and i < len(words) - 1:
+                continue
+
+            next_start = i + 1
+            sent_len = next_start - sentence_start
+
+            if sent_len > max_sentence:
+                mid = sent_len // 2
+                split_pos = sentence_start + mid
+                for offset in range(mid, 0, -1):
+                    if words[sentence_start + offset - 1].rstrip().endswith((',', ';', ':', '.')):
+                        split_pos = sentence_start + offset
+                        break
+                _flush_passage(words, block_start, split_pos, passages)
+                block_start = sentence_start = split_pos
+                block_wc = next_start - split_pos
+            else:
+                block_wc += sent_len
+                sentence_start = next_start
+
+            if block_wc > cap:
+                _flush_passage(words, block_start, next_start, passages)
+                block_start = next_start
+                block_wc = 0
+
+        if block_start < len(words):
+            _flush_passage(words, block_start, len(words), passages)
+
+    return passages
+
+
 def _generate_tts_from_paragraphs(text: str, lang: str, kokoro: Kokoro, voice: str, speed: float, pron_dict: dict):
-    natural_paras = _split_natural_paragraphs(text)
-    total = len(natural_paras)
+    paras = _split_natural_paragraphs(text)
+    total = len(paras)
     all_audio = []
-    all_word_ts = []
+    all_para_ts = []
     cum_samples = 0
     sr = SAMPLE_RATE
 
-    for pi, para in enumerate(natural_paras):
+    for pi, para in enumerate(paras):
         para = re.sub(r"\s+", " ", para).strip()
         if not para:
             continue
@@ -354,13 +410,15 @@ def _generate_tts_from_paragraphs(text: str, lang: str, kokoro: Kokoro, voice: s
         para_end_ms = para_start_ms + para_duration_ms
 
         all_audio.append(flat)
-        word_ts = _distribute_paragraph_timings(para, para_start_ms, para_end_ms)
-        all_word_ts.extend(word_ts)
+        all_para_ts.append({
+            "text": para,
+            "start_ms": round(para_start_ms),
+            "end_ms": round(para_end_ms),
+        })
         cum_samples += len(flat)
 
     audio = np.concatenate(all_audio) if all_audio else np.array([], dtype=np.float32)
-    para_ts = _group_word_ts_to_blocks(all_word_ts)
-    return audio, sr, all_word_ts, para_ts
+    return audio, sr, [], all_para_ts
 
 
 def _generate_segmented_audio(
@@ -373,7 +431,7 @@ def _generate_segmented_audio(
     pron_dict: dict,
 ):
     all_audio = []
-    all_word_ts = []
+    all_para_ts = []
     cum_samples = 0
     sr = SAMPLE_RATE
     total = len(segments)
@@ -389,30 +447,37 @@ def _generate_segmented_audio(
         sys.stderr.write(json.dumps({"status": "paragraph", "value": f"{seg_idx}/{total}"}) + "\n")
         sys.stderr.flush()
 
-        if pron_dict:
-            phonemes = _apply_custom_phonemes(text, pron_dict, lang, kokoro.tokenizer)
-            chunks = _chunk_phonemes(phonemes)
-            chunk_samples = []
-            for chunk in chunks:
-                s, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang, is_phonemes=True, trim=False)
-                chunk_samples.append(s.flatten() if s.ndim > 1 else s)
-            flat = np.concatenate(chunk_samples) if chunk_samples else np.array([], dtype=np.float32)
-        else:
-            samples, sr = kokoro.create(text, voice=voice, speed=speed, lang=lang, trim=False)
-            flat = samples.flatten() if samples.ndim > 1 else samples
+        for para in _split_natural_paragraphs(text):
+            para = re.sub(r"\s+", " ", para).strip()
+            if not para:
+                continue
 
-        seg_duration_ms = len(flat) / sr * 1000.0
-        seg_start_ms = cum_samples / sr * 1000.0
-        seg_end_ms = seg_start_ms + seg_duration_ms
+            if pron_dict:
+                phonemes = _apply_custom_phonemes(para, pron_dict, lang, kokoro.tokenizer)
+                chunks = _chunk_phonemes(phonemes)
+                chunk_samples = []
+                for chunk in chunks:
+                    s, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang, is_phonemes=True, trim=False)
+                    chunk_samples.append(s.flatten() if s.ndim > 1 else s)
+                flat = np.concatenate(chunk_samples) if chunk_samples else np.array([], dtype=np.float32)
+            else:
+                samples, sr = kokoro.create(para, voice=voice, speed=speed, lang=lang, trim=False)
+                flat = samples.flatten() if samples.ndim > 1 else samples
 
-        all_audio.append(flat)
-        word_ts = _distribute_paragraph_timings(text, seg_start_ms, seg_end_ms)
-        all_word_ts.extend(word_ts)
-        cum_samples += len(flat)
+            para_duration_ms = len(flat) / sr * 1000.0
+            para_start_ms = cum_samples / sr * 1000.0
+            para_end_ms = para_start_ms + para_duration_ms
+
+            all_audio.append(flat)
+            all_para_ts.append({
+                "text": para,
+                "start_ms": round(para_start_ms),
+                "end_ms": round(para_end_ms),
+            })
+            cum_samples += len(flat)
 
     audio = np.concatenate(all_audio) if all_audio else np.array([], dtype=np.float32)
-    para_ts = _group_word_ts_to_blocks(all_word_ts)
-    return audio, sr, all_word_ts, para_ts
+    return audio, sr, [], all_para_ts
 
 
 def _chunk_text(full_text: str) -> list:
