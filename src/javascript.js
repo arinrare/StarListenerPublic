@@ -40,6 +40,11 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentFilePath = null;
     let lastScanResults = null;
     let highlightInterval = null;
+    let readingPositionMs = 0;
+    let currentHighlightEl = null;
+    let allSpans = [];
+    let justSeeked = false;
+    let isResumePlayback = false;
 
     let searchMatches = [];
     let currentMatchIdx = -1;
@@ -215,6 +220,12 @@ document.addEventListener('DOMContentLoaded', function() {
         output.innerText = "Extracting text...";
         ttsBtn.disabled = true;
 
+        readingPositionMs = 0;
+        currentHighlightEl = null;
+        allSpans = [];
+        const tb = document.getElementById('transportBar');
+        if (tb) tb.style.display = 'none';
+
         let statusBase = '';
         const statusHandler = (data) => {
             if (data && data.status && data.value) {
@@ -263,6 +274,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     bookPath: currentFilePath,
                     audioPath: result.output_path || '',
                     timestampsPath: result.timestamps_path || '',
+                    readingPositionMs: readingPositionMs || 0,
                 };
                 window.electronAPI.saveSessionInfo(sessionData);
             }
@@ -290,12 +302,18 @@ document.addEventListener('DOMContentLoaded', function() {
             searchBarEl.style.display = 'none';
             clearSearchHighlights();
             searchInputEl.value = '';
+            readingPositionMs = 0;
+            currentHighlightEl = null;
+            allSpans = [];
+            const tb = document.getElementById('transportBar');
+            if (tb) tb.style.display = 'none';
             const existingAudio = document.getElementById('ttsAudio');
-            if (existingAudio) existingAudio.remove();
-            if (highlightInterval) {
-                const oldAudio = document.getElementById('ttsAudio');
-                if (oldAudio) oldAudio.removeEventListener('timeupdate', highlightInterval);
-                highlightInterval = null;
+            if (existingAudio) {
+                if (highlightInterval) {
+                    existingAudio.removeEventListener('timeupdate', highlightInterval);
+                    highlightInterval = null;
+                }
+                existingAudio.remove();
             }
             const basename = filePath.split(/[/\\]/).pop();
             currentFileEl.innerText = basename;
@@ -711,43 +729,186 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    function getTtsAudio() {
+        return document.getElementById('ttsAudio');
+    }
+
+    function saveReadingPosition() {
+        if (!currentFilePath) return;
+        localStorage.setItem('starlistener_reading_' + currentFilePath, readingPositionMs);
+    }
+
+    function applyReadMarks() {
+        for (let i = 0; i < allSpans.length; i++) {
+            allSpans[i].classList.remove('read');
+        }
+        for (let i = 0; i < allSpans.length; i++) {
+            if (parseFloat(allSpans[i].dataset.end) <= readingPositionMs) {
+                allSpans[i].classList.add('read');
+            } else {
+                break;
+            }
+        }
+        const rb = document.getElementById('resumeBtn');
+        if (rb) rb.innerHTML = readingPositionMs > 0 ? 'Resume<br>Reading' : 'Begin<br>Reading';
+        saveReadingPosition();
+    }
+
     function startHighlighting(audio, timestamps) {
         if (highlightInterval) {
             audio.removeEventListener('timeupdate', highlightInterval);
         }
 
+        if (currentHighlightEl) {
+            currentHighlightEl.classList.remove('highlighted');
+            currentHighlightEl = null;
+        }
+
+        justSeeked = false;
+        isResumePlayback = false;
+
+        allSpans.forEach(function(s) { s.classList.remove('read'); });
+
         const wordSpans = textDisplayEl.querySelectorAll('.word-span');
         const paraBlocks = textDisplayEl.querySelectorAll('.para-block');
-        const spans = wordSpans.length > 0
+        allSpans = wordSpans.length > 0
             ? [...wordSpans]
             : paraBlocks.length > 0
                 ? [...paraBlocks]
                 : [...textDisplayEl.querySelectorAll('span[data-start]')];
 
-        let lastIdx = 0;
+        function findSpanAt(ms) {
+            let lo = 0;
+            let hi = allSpans.length - 1;
+            while (lo <= hi) {
+                const mid = (lo + hi) >> 1;
+                const start = parseFloat(allSpans[mid].dataset.start);
+                const end = parseFloat(allSpans[mid].dataset.end);
+                if (ms >= start && ms < end) return mid;
+                if (ms < start) hi = mid - 1;
+                else lo = mid + 1;
+            }
+            return -1;
+        }
 
         function update() {
             const ms = audio.currentTime * 1000;
-            while (lastIdx < spans.length && parseFloat(spans[lastIdx].dataset.end) < ms) {
-                spans[lastIdx].classList.remove('highlighted');
-                lastIdx++;
+
+            const idx = findSpanAt(ms);
+            if (idx !== -1) {
+                const el = allSpans[idx];
+                if (el !== currentHighlightEl) {
+                    if (currentHighlightEl) currentHighlightEl.classList.remove('highlighted');
+                    currentHighlightEl = el;
+                    el.classList.add('highlighted');
+                }
+            } else if (currentHighlightEl) {
+                currentHighlightEl.classList.remove('highlighted');
+                currentHighlightEl = null;
             }
-            if (lastIdx < spans.length && ms >= parseFloat(spans[lastIdx].dataset.start)) {
-                spans[lastIdx].classList.add('highlighted');
+
+            if (!audio.paused && ms > readingPositionMs) {
+                if (justSeeked) {
+                    justSeeked = false;
+                } else if (isResumePlayback) {
+                    readingPositionMs = ms;
+                    applyReadMarks();
+                }
             }
         }
 
         highlightInterval = update;
         audio.addEventListener('timeupdate', update);
+
+        if (readingPositionMs > 0) {
+            applyReadMarks();
+        }
+
+        const transportBar = document.getElementById('transportBar');
+        if (transportBar) transportBar.style.display = 'flex';
+
+        const playBtn = document.getElementById('playPauseBtn');
+        if (playBtn) playBtn.textContent = audio.paused ? '\u25B6 Play' : '\u23F8 Pause';
+
+        audio.addEventListener('play', function() {
+            const btn = document.getElementById('playPauseBtn');
+            if (btn) btn.textContent = '\u23F8 Pause';
+            if (currentHighlightEl) {
+                currentHighlightEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }
+        });
+        audio.addEventListener('pause', function() {
+            const btn = document.getElementById('playPauseBtn');
+            if (btn) btn.textContent = '\u25B6 Play';
+            isResumePlayback = false;
+        });
+        audio.addEventListener('ended', function() {
+            const btn = document.getElementById('playPauseBtn');
+            if (btn) btn.textContent = '\u25B6 Play';
+            isResumePlayback = false;
+        });
+
+        audio.addEventListener('seeking', function() {
+            justSeeked = true;
+        });
+        audio.addEventListener('seeked', function() {
+            justSeeked = true;
+            if (currentHighlightEl) {
+                currentHighlightEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }
+        });
+
+        const rb = document.getElementById('resumeBtn');
+        if (rb) rb.innerHTML = readingPositionMs > 0 ? 'Resume<br>Reading' : 'Begin<br>Reading';
     }
 
-    textDisplayEl.addEventListener('click', (e) => {
-        const audio = document.getElementById('ttsAudio');
+    textDisplayEl.addEventListener('click', function(e) {
+        const audio = getTtsAudio();
         if (!audio) return;
         const el = e.target.closest('.word-span') || e.target.closest('.para-block') || e.target.closest('[data-start]');
         if (!el) return;
         audio.currentTime = parseFloat(el.dataset.start) / 1000;
     });
+
+    const playPauseBtn = document.getElementById('playPauseBtn');
+    playPauseBtn.addEventListener('click', function() {
+        const a = getTtsAudio();
+        if (!a) return;
+        if (a.paused) a.play();
+        else a.pause();
+    });
+
+    const resumeBtn = document.getElementById('resumeBtn');
+    resumeBtn.addEventListener('click', function() {
+        const a = getTtsAudio();
+        if (!a) return;
+        isResumePlayback = true;
+        a.currentTime = readingPositionMs / 1000;
+        a.play();
+    });
+
+    const resumeHereBtn = document.getElementById('resumeHereBtn');
+    resumeHereBtn.addEventListener('click', function() {
+        const a = getTtsAudio();
+        if (!a) return;
+        isResumePlayback = true;
+        readingPositionMs = Math.max(a.currentTime * 1000, readingPositionMs);
+        applyReadMarks();
+        a.play();
+    });
+
+    function skip(seconds) {
+        const a = getTtsAudio();
+        if (!a) return;
+        a.currentTime = Math.max(0, Math.min(a.duration || 0, a.currentTime + seconds));
+    }
+
+    document.getElementById('skipBack5m').addEventListener('click', function() { skip(-300); });
+    document.getElementById('skipBack1m').addEventListener('click', function() { skip(-60); });
+    document.getElementById('skipBack10s').addEventListener('click', function() { skip(-10); });
+    document.getElementById('skipFwd10s').addEventListener('click', function() { skip(10); });
+    document.getElementById('skipFwd1m').addEventListener('click', function() { skip(60); });
+    document.getElementById('skipFwd5m').addEventListener('click', function() { skip(300); });
 
     function clearSearchHighlights() {
         if (!textDisplayEl) return;
@@ -974,6 +1135,11 @@ document.addEventListener('DOMContentLoaded', function() {
             if (savedMarker) markerProfileSelect.value = savedMarker;
             const savedSpeed = localStorage.getItem('starlistener_playbackSpeed');
             if (savedSpeed) playbackSpeedSelect.value = savedSpeed;
+
+            readingPositionMs = saved.readingPositionMs || 0;
+            const localKey = 'starlistener_reading_' + saved.bookPath;
+            const localPos = localStorage.getItem(localKey);
+            if (localPos != null) readingPositionMs = Number(localPos);
 
             await loadBookData(currentFilePath);
         } catch (e) {

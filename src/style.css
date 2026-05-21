@@ -209,6 +209,53 @@ button:disabled {
     color: #000;
 }
 
+.text-display span.read,
+.text-display .para-block.read {
+    background: #1565c0;
+    color: #e3f2fd;
+}
+
+/* When both .read and .highlighted apply, .highlighted wins */
+.text-display span.highlighted.read,
+.text-display .para-block.highlighted.read {
+    background: #ffeb3b;
+    color: #000;
+}
+
+.transport-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    margin: 0 0 12px 0;
+    flex-wrap: wrap;
+}
+
+.transport-bar button {
+    padding: 8px 14px;
+    font-size: 0.85em;
+}
+
+#playPauseBtn {
+    background: #2e7d32;
+    min-width: 90px;
+    font-size: 0.9em;
+}
+
+#resumeBtn {
+    background: #e65100;
+    min-width: 100px;
+    font-size: 0.9em;
+    line-height: 1.2;
+}
+
+#resumeHereBtn {
+    background: #e65100;
+    min-width: 100px;
+    font-size: 0.85em;
+    line-height: 1.2;
+}
+
 .para-block {
     display: block;
     border: 1px solid transparent;
