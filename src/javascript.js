@@ -716,10 +716,13 @@ document.addEventListener('DOMContentLoaded', function() {
             audio.removeEventListener('timeupdate', highlightInterval);
         }
 
+        const wordSpans = textDisplayEl.querySelectorAll('.word-span');
         const paraBlocks = textDisplayEl.querySelectorAll('.para-block');
-        const spans = paraBlocks.length > 0
-            ? [...paraBlocks]
-            : [...textDisplayEl.querySelectorAll('span[data-start]')];
+        const spans = wordSpans.length > 0
+            ? [...wordSpans]
+            : paraBlocks.length > 0
+                ? [...paraBlocks]
+                : [...textDisplayEl.querySelectorAll('span[data-start]')];
 
         let lastIdx = 0;
 
@@ -741,7 +744,7 @@ document.addEventListener('DOMContentLoaded', function() {
     textDisplayEl.addEventListener('click', (e) => {
         const audio = document.getElementById('ttsAudio');
         if (!audio) return;
-        const el = e.target.closest('.para-block') || e.target.closest('[data-start]');
+        const el = e.target.closest('.word-span') || e.target.closest('.para-block') || e.target.closest('[data-start]');
         if (!el) return;
         audio.currentTime = parseFloat(el.dataset.start) / 1000;
     });

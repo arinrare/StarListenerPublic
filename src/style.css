@@ -189,6 +189,15 @@ button:disabled {
     border-radius: 2px;
 }
 
+.text-display span.word-span {
+    cursor: pointer;
+}
+
+.text-display span.word-span:hover {
+    background: rgba(74, 144, 226, 0.15);
+    border-radius: 2px;
+}
+
 .text-display span.para-span {
     display: block;
     margin-bottom: 10px;
@@ -202,16 +211,10 @@ button:disabled {
 
 .para-block {
     display: block;
-    cursor: pointer;
     border: 1px solid transparent;
     border-radius: 4px;
     padding: 2px 6px;
     margin-bottom: 8px;
-}
-
-.para-block:hover {
-    border-color: #4a90e2;
-    background: rgba(74, 144, 226, 0.05);
 }
 
 .search-bar {

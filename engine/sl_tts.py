@@ -3,6 +3,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -11,23 +13,13 @@ import numpy as np
 from bs4 import BeautifulSoup
 from ebooklib import epub
 import soundfile as sf
+import torch
 
-_venv_root = Path(__file__).resolve().parents[1] / ".venv" / "Lib" / "site-packages"
-_capi = str(_venv_root / "onnxruntime" / "capi")
-if os.path.isdir(_capi):
-    os.environ["PATH"] = _capi + os.pathsep + os.environ.get("PATH", "")
+warnings.filterwarnings("ignore", message=".*dropout.*num_layers.*")
+warnings.filterwarnings("ignore", message=".*weight_norm.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*torch.nn.utils.weight_norm.*")
 
-os.environ.setdefault("ORT_LOG_LEVEL", "4")
-os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
-
-import onnxruntime as _rt
-_rt.set_default_logger_severity(4)
-_rt.preload_dlls()
-if "CUDAExecutionProvider" in _rt.get_available_providers():
-    os.environ.setdefault("ONNX_PROVIDER", "CUDAExecutionProvider")
-
-
-from kokoro_onnx import Kokoro
+from kokoro import KPipeline
 
 SAMPLE_RATE = 24000
 
@@ -35,22 +27,6 @@ try:
     from sl_utility import _preprocess_for_notes
 except ModuleNotFoundError:
     from .sl_utility import _preprocess_for_notes  # type: ignore
-
-
-def _get_project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _get_model_path(model_name: str) -> str:
-    return str(_get_project_root() / "assets" / model_name)
-
-
-def _env_model() -> str:
-    return str(os.environ.get("TTS_MODEL", "kokoro-v1.0.fp16-gpu.onnx")).strip().strip("'\"")
-
-
-def _env_voices() -> str:
-    return str(os.environ.get("TTS_VOICES", "voices-v1.0.bin")).strip().strip("'\"")
 
 
 def _env_bitrate() -> str:
@@ -124,65 +100,8 @@ def _extract_epub_text(epub_path: str, word_limit: Optional[int] = None) -> Tupl
     return full_text, min(total_words, word_limit) if word_limit else total_words
 
 
-def _load_pronunciations(filename: str) -> dict:
-    path = _get_project_root() / "assets" / filename
-    if not path.is_file():
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _apply_custom_phonemes(text: str, pron_dict: dict, lang: str, tokenizer) -> str:
-    escaped = [re.escape(w) for w in pron_dict.keys()]
-    pattern = re.compile(r"\b(" + "|".join(escaped) + r")\b", re.IGNORECASE)
-
-    parts = []
-    last_end = 0
-
-    for match in pattern.finditer(text):
-        before = text[last_end:match.start()]
-        if before:
-            parts.append(tokenizer.phonemize(before, lang))
-
-        matched = match.group(0)
-        for key, phoneme in pron_dict.items():
-            if key.lower() == matched.lower():
-                parts.append(phoneme)
-                break
-
-        last_end = match.end()
-
-    if last_end < len(text):
-        parts.append(tokenizer.phonemize(text[last_end:], lang))
-
-    return " ".join(parts)
-
-
-# kokoro_onnx has an off-by-one bug: after truncating phonemes to MAX_PHONEME_LENGTH (510),
-# it tries voice[len(tokens)] which crashes when len(tokens) == 510.
-# We chunk to 509 to stay safely within bounds.
-_PHONEME_CHUNK_MAX = 509
-
-
-def _chunk_phonemes(phonemes: str, max_len: int = _PHONEME_CHUNK_MAX) -> list:
-    if len(phonemes) <= max_len:
-        return [phonemes]
-    parts = phonemes.split(" ")
-    chunks = []
-    current = ""
-    for part in parts:
-        if len(current) + len(part) + (1 if current else 0) > max_len:
-            if current:
-                chunks.append(current)
-            while len(part) > max_len:
-                chunks.append(part[:max_len])
-                part = part[max_len:]
-            current = part
-        else:
-            current = (current + " " + part) if current else part
-    if current:
-        chunks.append(current)
-    return chunks
+def _get_project_root() -> Path:
+    return Path(__file__).resolve().parents[1]
 
 
 def _wav_to_mp3(wav_path: str, mp3_path: str, bitrate: str) -> bool:
@@ -222,30 +141,6 @@ def _get_output_dir(epub_path: Optional[str]) -> Path:
 
 
 
-def _distribute_paragraph_timings(para_text: str, para_start_ms: float, para_end_ms: float) -> list:
-    words = para_text.split()
-    word_chars = [len(w) for w in words]
-    total_word_chars = sum(word_chars)
-    if total_word_chars == 0:
-        return []
-
-    para_duration = para_end_ms - para_start_ms
-    ms_per_word_char = para_duration / total_word_chars
-
-    word_ts = []
-    cursor_ms = para_start_ms
-    for w in words:
-        dur = len(w) * ms_per_word_char
-        word_ts.append({
-            "word": w + " ",
-            "start_ms": round(cursor_ms),
-            "end_ms": round(cursor_ms + dur),
-        })
-        cursor_ms += dur
-
-    return word_ts
-
-
 def _split_natural_paragraphs(full_text: str) -> list:
     text = re.sub(r"\r\n?", "\n", full_text)
     lines = text.split("\n")
@@ -270,169 +165,120 @@ def _split_natural_paragraphs(full_text: str) -> list:
     return paragraphs
 
 
-def _group_word_ts_to_blocks(word_ts: list) -> list:
-    CAP = 50
-    MAX_SENTENCE = 80
-    blocks = []
-    block_start = 0
-    sentence_start = 0
-    block_wc = 0
-
-    for i, wt in enumerate(word_ts):
-        is_end = wt["word"].rstrip().endswith(('.', '!', '?'))
-        if not is_end and i < len(word_ts) - 1:
-            continue
-
-        next_start = i + 1
-        sent_len = next_start - sentence_start
-
-        if sent_len > MAX_SENTENCE:
-            words = [word_ts[j]["word"] for j in range(sentence_start, next_start)]
-            mid = len(words) // 2
-            for offset in range(mid, 0, -1):
-                if words[offset - 1].rstrip().endswith((',', ';', ':', '.')):
-                    mid = offset
-                    break
-            split = sentence_start + mid
-            _flush_block(word_ts, block_start, split, blocks)
-            block_start = sentence_start = split
-            block_wc = next_start - split
-        else:
-            block_wc += sent_len
-            sentence_start = next_start
-
-        if block_wc > CAP:
-            _flush_block(word_ts, block_start, next_start, blocks)
-            block_start = next_start
-            block_wc = 0
-
-    if block_start < len(word_ts):
-        _flush_block(word_ts, block_start, len(word_ts), blocks)
-    return blocks
+def _load_pronunciations(filename: str) -> dict:
+    path = _get_project_root() / "assets" / filename
+    if not path.is_file():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def _flush_block(word_ts: list, start: int, end: int, blocks: list) -> None:
-    if start < end:
-        text = "".join(wt["word"] for wt in word_ts[start:end]).strip()
-        if text:
-            blocks.append({
-                "text": text,
-                "start_ms": word_ts[start]["start_ms"],
-                "end_ms": word_ts[end - 1]["end_ms"],
-            })
+def _apply_pronunciations(text: str, pron_dict: dict) -> str:
+    if not pron_dict:
+        return text
+    escaped = [re.escape(w) for w in pron_dict.keys()]
+    pattern = re.compile(r"\b(" + "|".join(escaped) + r")\b")
+
+    def replacer(match):
+        matched = match.group(0)
+        for key, phoneme in pron_dict.items():
+            if key.lower() == matched.lower():
+                return f"[{matched}](/{phoneme}/)"
+        return matched
+
+    return pattern.sub(replacer, text)
 
 
-def _flush_passage(words: list, start: int, end: int, passages: list) -> None:
-    if start < end:
-        text = " ".join(words[start:end]).strip()
-        if text:
-            passages.append(text)
+_PIPELINE_CACHE: dict = {}
 
 
-def _split_text_into_passages(text: str, cap: int = 50, max_sentence: int = 80) -> list:
-    paragraphs = _split_natural_paragraphs(text)
-    passages = []
-
-    for para in paragraphs:
-        para = re.sub(r"\s+", " ", para).strip()
-        if not para:
-            continue
-        words = para.split()
-        if not words:
-            continue
-
-        block_start = 0
-        sentence_start = 0
-        block_wc = 0
-
-        for i, word in enumerate(words):
-            is_end = word.rstrip().endswith(('.', '!', '?'))
-            if not is_end and i < len(words) - 1:
-                continue
-
-            next_start = i + 1
-            sent_len = next_start - sentence_start
-
-            if sent_len > max_sentence:
-                mid = sent_len // 2
-                split_pos = sentence_start + mid
-                for offset in range(mid, 0, -1):
-                    if words[sentence_start + offset - 1].rstrip().endswith((',', ';', ':', '.')):
-                        split_pos = sentence_start + offset
-                        break
-                _flush_passage(words, block_start, split_pos, passages)
-                block_start = sentence_start = split_pos
-                block_wc = next_start - split_pos
-            else:
-                block_wc += sent_len
-                sentence_start = next_start
-
-            if block_wc > cap:
-                _flush_passage(words, block_start, next_start, passages)
-                block_start = next_start
-                block_wc = 0
-
-        if block_start < len(words):
-            _flush_passage(words, block_start, len(words), passages)
-
-    return passages
+def _get_pipeline(lang: str) -> KPipeline:
+    lang_code = _lang_to_code(lang)
+    if lang_code not in _PIPELINE_CACHE:
+        _PIPELINE_CACHE[lang_code] = KPipeline(lang_code=lang_code)
+    return _PIPELINE_CACHE[lang_code]
 
 
-def _generate_tts_from_paragraphs(text: str, lang: str, kokoro: Kokoro, voice: str, speed: float, pron_dict: dict):
+def _lang_to_code(lang: str) -> str:
+    if lang.startswith("en-us") or lang.startswith("en"):
+        return "a"
+    if lang.startswith("en-gb"):
+        return "b"
+    return "a"
+
+
+def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float, pron_dict: dict):
+    pipeline = _get_pipeline(lang)
     paras = _split_natural_paragraphs(text)
     total = len(paras)
     all_audio = []
+    all_word_ts = []
     all_para_ts = []
-    cum_samples = 0
+    cum_ms = 0.0
     sr = SAMPLE_RATE
 
     for pi, para in enumerate(paras):
         para = re.sub(r"\s+", " ", para).strip()
         if not para:
             continue
+        para = _apply_pronunciations(para, pron_dict)
         sys.stderr.write(json.dumps({"status": "paragraph", "value": f"{pi+1}/{total}"}) + "\n")
         sys.stderr.flush()
 
-        if pron_dict:
-            phonemes = _apply_custom_phonemes(para, pron_dict, lang, kokoro.tokenizer)
-            chunks = _chunk_phonemes(phonemes)
-            chunk_samples = []
-            for chunk in chunks:
-                s, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang, is_phonemes=True, trim=False)
-                chunk_samples.append(s.flatten() if s.ndim > 1 else s)
-            flat = np.concatenate(chunk_samples) if chunk_samples else np.array([], dtype=np.float32)
-        else:
-            samples, sr = kokoro.create(para, voice=voice, speed=speed, lang=lang, trim=False)
-            flat = samples.flatten() if samples.ndim > 1 else samples
+        para_samples = 0
+        para_word_ts = []
+        sub_offset_ms = 0.0
 
-        para_duration_ms = len(flat) / sr * 1000.0
-        para_start_ms = cum_samples / sr * 1000.0
-        para_end_ms = para_start_ms + para_duration_ms
+        for result in pipeline(para, voice=voice, speed=speed):
+            audio_tensor = result.audio
+            sub_samples = 0
+            if audio_tensor is not None:
+                audio_np = audio_tensor.cpu().numpy()
+                sub_samples = len(audio_np)
+                para_samples += sub_samples
+                all_audio.append(audio_np)
+            if hasattr(result, "tokens") and result.tokens:
+                for t in result.tokens:
+                    para_word_ts.append({
+                        "word": t.text + (t.whitespace if t.whitespace else ""),
+                        "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
+                        "end_ms": round(t.end_ts * 1000 + sub_offset_ms),
+                    })
+            sub_offset_ms += sub_samples / sr * 1000.0
 
-        all_audio.append(flat)
+        para_start_ms = cum_ms
+        para_end_ms = para_start_ms + (para_samples / sr * 1000.0)
+
+        if para_word_ts:
+            for wt in para_word_ts:
+                wt["start_ms"] = round(wt["start_ms"] + para_start_ms)
+                wt["end_ms"] = round(wt["end_ms"] + para_start_ms)
+            all_word_ts.extend(para_word_ts)
         all_para_ts.append({
             "text": para,
             "start_ms": round(para_start_ms),
             "end_ms": round(para_end_ms),
         })
-        cum_samples += len(flat)
+        cum_ms = para_end_ms
 
     audio = np.concatenate(all_audio) if all_audio else np.array([], dtype=np.float32)
-    return audio, sr, [], all_para_ts
+    return audio, sr, all_word_ts, all_para_ts
 
 
 def _generate_segmented_audio(
     segments: list,
     main_voice: str,
     footnote_voice: str,
-    kokoro: Kokoro,
     speed: float,
     lang: str,
     pron_dict: dict,
 ):
+    lang_code = _lang_to_code(lang)
+    pipeline = _get_pipeline(lang)
     all_audio = []
+    all_word_ts = []
     all_para_ts = []
-    cum_samples = 0
+    cum_ms = 0.0
     sr = SAMPLE_RATE
     total = len(segments)
     seg_idx = 0
@@ -451,33 +297,47 @@ def _generate_segmented_audio(
             para = re.sub(r"\s+", " ", para).strip()
             if not para:
                 continue
+            para = _apply_pronunciations(para, pron_dict)
 
-            if pron_dict:
-                phonemes = _apply_custom_phonemes(para, pron_dict, lang, kokoro.tokenizer)
-                chunks = _chunk_phonemes(phonemes)
-                chunk_samples = []
-                for chunk in chunks:
-                    s, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang, is_phonemes=True, trim=False)
-                    chunk_samples.append(s.flatten() if s.ndim > 1 else s)
-                flat = np.concatenate(chunk_samples) if chunk_samples else np.array([], dtype=np.float32)
-            else:
-                samples, sr = kokoro.create(para, voice=voice, speed=speed, lang=lang, trim=False)
-                flat = samples.flatten() if samples.ndim > 1 else samples
+            para_samples = 0
+            para_word_ts = []
+            sub_offset_ms = 0.0
 
-            para_duration_ms = len(flat) / sr * 1000.0
-            para_start_ms = cum_samples / sr * 1000.0
-            para_end_ms = para_start_ms + para_duration_ms
+            for result in pipeline(para, voice=voice, speed=speed):
+                audio_tensor = result.audio
+                sub_samples = 0
+                if audio_tensor is not None:
+                    audio_np = audio_tensor.cpu().numpy()
+                    sub_samples = len(audio_np)
+                    para_samples += sub_samples
+                    all_audio.append(audio_np)
+                if hasattr(result, "tokens") and result.tokens:
+                    for t in result.tokens:
+                        if t.start_ts is not None and t.end_ts is not None:
+                            para_word_ts.append({
+                                "word": t.text + (t.whitespace if t.whitespace else ""),
+                                "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
+                                "end_ms": round(t.end_ts * 1000 + sub_offset_ms),
+                            })
+                sub_offset_ms += sub_samples / sr * 1000.0
 
-            all_audio.append(flat)
+            para_start_ms = cum_ms
+            para_end_ms = para_start_ms + (para_samples / sr * 1000.0)
+
+            if para_word_ts:
+                for wt in para_word_ts:
+                    wt["start_ms"] = round(wt["start_ms"] + para_start_ms)
+                    wt["end_ms"] = round(wt["end_ms"] + para_start_ms)
+                all_word_ts.extend(para_word_ts)
             all_para_ts.append({
                 "text": para,
                 "start_ms": round(para_start_ms),
                 "end_ms": round(para_end_ms),
             })
-            cum_samples += len(flat)
+            cum_ms = para_end_ms
 
     audio = np.concatenate(all_audio) if all_audio else np.array([], dtype=np.float32)
-    return audio, sr, [], all_para_ts
+    return audio, sr, all_word_ts, all_para_ts
 
 
 def _chunk_text(full_text: str) -> list:
@@ -728,32 +588,22 @@ def generate_tts(
     voice: str = "bf_emma",
     speed: float = 1.0,
     lang: str = "en-gb",
-    model_path: Optional[str] = None,
-    voices_path: Optional[str] = None,
     output_path: Optional[str] = None,
     voice_segments: Optional[list] = None,
     footnote_voice: str = "bm_george",
     epub_path: Optional[str] = None,
     full_text: Optional[str] = None,
 ) -> dict:
-    model = model_path or _get_model_path(_env_model())
-    voices = voices_path or _get_model_path(_env_voices())
-
-    if not os.path.isfile(model):
-        return {"error": f"Model file not found: {model}"}
-    if not os.path.isfile(voices):
-        return {"error": f"Voices file not found: {voices}"}
-
-    kokoro = Kokoro(model, voices)
-    sys.stderr.write(json.dumps({"status": "provider", "value": str(kokoro.sess.get_providers()[0])}) + "\n")
+    sys.stderr.write(json.dumps({"status": "provider", "value": str(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")}) + "\n")
     sys.stderr.flush()
+
     pron_dict = _load_pronunciations(_env_pronunciations())
 
     if voice_segments:
         sys.stderr.write(json.dumps({"status": "debug", "path": "segmented", "count": len(voice_segments)}) + "\n")
         sys.stderr.flush()
         samples, sample_rate, word_ts, para_ts = _generate_segmented_audio(
-            voice_segments, voice, footnote_voice, kokoro, speed, lang, pron_dict
+            voice_segments, voice, footnote_voice, speed, lang, pron_dict
         )
         display_text = full_text or " ".join(st for _, st in voice_segments)
     elif text:
@@ -761,7 +611,7 @@ def generate_tts(
         sys.stderr.flush()
         display_text = full_text or text
         samples, sample_rate, word_ts, para_ts = _generate_tts_from_paragraphs(
-            display_text, lang, kokoro, voice, speed, pron_dict
+            display_text, lang, voice, speed, pron_dict
         )
     else:
         return {"error": "No text or voice segments provided"}

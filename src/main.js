@@ -172,7 +172,14 @@ ipcMain.handle('run-tts', async (event, args) => {
     pythonProcess.on('close', (code) => {
       try { fs.unlinkSync(tmpFile); } catch (_) {}
       if (code === 0) {
-        resolve(stdoutData.trim());
+        const cleaned = stdoutData.trim();
+        const start = cleaned.indexOf('{');
+        const end = cleaned.lastIndexOf('}');
+        if (start !== -1 && end !== -1) {
+          resolve(cleaned.slice(start, end + 1));
+        } else {
+          resolve(cleaned);
+        }
       } else {
         reject(`Python TTS exited with code ${code}. Error: ${stderrData}`);
       }

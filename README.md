@@ -1,4 +1,4 @@
-# Star Listener v0.0.1
+# Star Listener v0.0.2
 
 ### Note: This Electron application has been coded with heavy AI assistance. It has been tested locally by me (i use it daily). If you are not comfortable with this, then it is your perogative to not use it.
 
@@ -7,8 +7,11 @@
 - NodeJS
 https://nodejs.org/en/download
 
-- Python
+- Python (3.12 required — newer versions lack pre-built wheels for dependency packages)
 https://www.python.org/downloads/
+
+- espeak-ng (Windows only)
+https://github.com/espeak-ng/espeak-ng/releases — download and run the `.msi` installer
 
 ## To set up and run
 
@@ -46,45 +49,52 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
 
-**CPU-Accelerated Runtime (Must install):**
-```
-.\.venv\Scripts\python.exe -m pip install kokoro-onnx soundfile onnxruntime
-```
+**Kokoro TTS (PyTorch with word-level timestamps):**
 
-**GPU-Accelerated Runtime (Optional install: Recommended for NVIDIA RTX):**
 ```
-.\.venv\Scripts\python.exe -m pip install "onnxruntime-gpu[cuda,cudnn]"
+.\.venv\Scripts\python.exe -m pip install "kokoro>=0.9.4" soundfile
 ```
-
-> The `[cuda,cudnn]` extras automatically install the correct NVIDIA CUDA 12.x and cuDNN 9.x packages. No separate `nvidia-*` installs needed.
 
 ### Troubleshooting GPU Detection
 
 **Verify CUDA is detected:**
 ```
-.\.venv\Scripts\python.exe -c "import onnxruntime; print(onnxruntime.get_available_providers())"
+.\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"
 ```
-You should see `'CUDAExecutionProvider'` in the output.
+You should see `True` in the output.
 
-**If CUDA is NOT listed, try these fixes in order:**
+### 5. Model files (auto-downloaded, offline after first run)
 
-1. **CPU package conflict** (most common): If you accidentally installed  `onnxruntime` after `onnxruntime-gpu`, run:
-   ```
-   .\.venv\Scripts\python.exe -m pip install --force-reinstall "onnxruntime-gpu[cuda,cudnn]"
-   ```
-2. **Force CUDA provider**: In your `.env` file, set `ONNX_PROVIDER = "CUDAExecutionProvider"` to skip auto-detection.
-3. **Driver**: Ensure NVIDIA Game Ready or Studio drivers are installed (not Windows DCH). Run `nvidia-smi` to confirm.
+The Kokoro PyTorch model and voice files (~330 MB total) are downloaded automatically from HuggingFace on first use. No manual downloads required.
 
-### 5. Download the Kokoro ONNX model files
+**IMPORTANT — First run must be online.** The model weights and voice files need to be downloaded once. After the initial download, enable offline mode by adding to `.env`:
 
-Place them in the `/assets` folder:
-- `kokoro-v1.0.onnx` (CPU)
-- `kokoro-v1.0.fp16.onnx` (GPU, FP16)
-- `kokoro-v1.0.fp16-gpu.onnx` (GPU, FP16)
-- `kokoro-v1.0.int8.onnx` (GPU, INT8)
-- `voices-v1.0.bin`
+```env
+HF_HUB_OFFLINE = "1"
+HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
+```
 
-Download from: https://github.com/thewh1teagle/kokoro-onnx/releases
+**Quick first-run tip:** Limit words to download faster:
+```env
+TTS_WORD_LIMIT = "50"
+```
+This processes ~50 words (under a minute), downloads everything, then you can remove or increase the limit for subsequent runs.
+
+**Manual download (for fully offline setups):** If the target machine has no internet, download on another machine using the HuggingFace CLI:
+
+1. Install: `pip install huggingface_hub`
+2. Run: `huggingface-cli download hexgrad/Kokoro-82M --local-dir ./kokoro_model`
+3. Copy the `kokoro_model` folder to your target machine
+4. Set the model path before running: `set KOKORO_MODEL_DIR=C:\path\to\kokoro_model`
+5. Enable offline mode in `.env`: `HF_HUB_OFFLINE = "1"`
+
+Alternatively, run the following Python script on the online machine to populate the standard cache, then copy `~/.cache/huggingface/hub/models--hexgrad--Kokoro-82M/` to the target machine:
+```python
+from huggingface_hub import snapshot_download
+snapshot_download("hexgrad/Kokoro-82M")
+```
+
+### Custom Pronunciations
 
 ### Optional: PDF support
 ```
@@ -119,10 +129,7 @@ STARLISTENER_AI_DISABLED = "false"
 # Regression testing — writes scan results to /tests for golden-file comparison
 REGRESSION_TESTING = "false"
 
-# Text-to-Speech model
-TTS_MODEL = "kokoro-v1.0.fp16-gpu.onnx"
-TTS_VOICES = "voices-v1.0.bin"
-ONNX_PROVIDER = "CUDAExecutionProvider"
+# Text-to-Speech
 
 # TTS audio output
 TTS_BITRATE = "128k"
@@ -138,9 +145,6 @@ TTS_PRONUNCIATIONS = "pronunciations.json"
 | `STARLISTENER_AI_ENDPOINT` | — | OpenAI-compatible endpoint for AI disambiguation |
 | `STARLISTENER_AI_DISABLED` | `"false"` | Skip all AI HTTP calls (`"true"` = disabled) |
 | `REGRESSION_TESTING` | `"false"` | Write scan results JSON to `/tests` on each scan |
-| `TTS_MODEL` | `kokoro-v1.0.fp16-gpu.onnx` | Kokoro ONNX model file in `/assets` |
-| `TTS_VOICES` | `voices-v1.0.bin` | Voice styles file in `/assets` |
-| `ONNX_PROVIDER` | `CUDAExecutionProvider` | ONNX execution provider for TTS. Set to `CPUExecutionProvider` if GPU acceleration fails. |
 | `TTS_BITRATE` | `128k` | MP3 audio bitrate (ffmpeg `-b:a` value) |
 | `TTS_WORD_LIMIT` | (none = all words) | Max words to process from EPUB for TTS |
 | `TTS_PRONUNCIATIONS` | `pronunciations.json` | Custom IPA pronunciation dictionary in `/assets` |
@@ -155,8 +159,13 @@ Create `assets/pronunciations.json` with word-to-IPA mappings:
 {
   "tolkien": "tˈɒlkɪn",
   "Tolkien": "tˈɒlkɪn",
+  "TOLKIEN": "tˈɒlkɪn",
+  "feanor": "fˈeɪənɔː",
   "Feanor": "fˈeɪənɔː",
-  "Noldor": "nˈɒldɔː"
+  "FEANOR": "fˈeɪənɔː",
+  "noldor": "nˈɒldɔː",
+  "Noldor": "nˈɒldɔː",
+  "NOLDOR": "nˈɒldɔː"
 }
 ```
 
