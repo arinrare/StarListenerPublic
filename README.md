@@ -67,18 +67,12 @@ You should see `True` in the output.
 
 The Kokoro PyTorch model and voice files (~330 MB total) are downloaded automatically from HuggingFace on first use. No manual downloads required.
 
-**IMPORTANT — First run must be online.** The model weights and voice files need to be downloaded once. After the initial download, enable offline mode by adding to `.env`:
+**IMPORTANT — There is some communication with Huggingface for download of the initial model and voices as they are needed. Thee app must be online for this.** The model weights and voice files need to be downloaded the first time each of them are used in processing.You can enable offline mode by adding to `.env` the following, and follow the options for manual download if you prefer:
 
 ```env
 HF_HUB_OFFLINE = "1"
 HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
 ```
-
-**Quick first-run tip:** Limit words to download faster:
-```env
-TTS_WORD_LIMIT = "50"
-```
-This processes ~50 words (under a minute), downloads everything, then you can remove or increase the limit for subsequent runs.
 
 **Manual download (for fully offline setups):** If the target machine has no internet, download on another machine using the HuggingFace CLI:
 
@@ -148,6 +142,8 @@ TTS_PRONUNCIATIONS = "pronunciations.json"
 | `TTS_BITRATE` | `128k` | MP3 audio bitrate (ffmpeg `-b:a` value) |
 | `TTS_WORD_LIMIT` | (none = all words) | Max words to process from EPUB for TTS |
 | `TTS_PRONUNCIATIONS` | `pronunciations.json` | Custom IPA pronunciation dictionary in `/assets` |
+| `HF_HUB_OFFLINE` | `1` (Use the app fully offline) | `0` (Allow download of required model and voice files from Huggingface)|
+| `HF_HUB_DISABLE_SYMLINKS_WARNINGS` | `1` (If using online, disable warning messages about rate limits) |  `0` (Enable all warning messages) |
 
 ---
 
