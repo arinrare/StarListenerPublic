@@ -2,7 +2,7 @@
 
 ### Note: This Electron application has been coded with heavy AI assistance. It has been tested locally by me (i use it daily). If you are not comfortable with this, then it is your perogative to not use it.
 
-### Requiremenmts
+## Requiremenmts
 
 - NodeJS
 https://nodejs.org/en/download
@@ -13,7 +13,47 @@ https://www.python.org/downloads/
 - espeak-ng (Windows only)
 https://github.com/espeak-ng/espeak-ng/releases — download and run the `.msi` installer
 
-## To set up and run
+
+## Upgrading from the ONNX-based version
+
+If you previously set up the project with `kokoro-onnx`, follow these steps:
+
+**1. Switch to Python 3.12** (required by the new kokoro package):
+   - Check your version: `python --version`
+   - If above 3.12: install Python 3.12 from python.org (side-by-side is fine)
+   - 3.12 download: https://www.python.org/downloads/release/python-3129/
+
+**2. Rebuild the virtual environment:**
+   - Delete the old venv (removes all old packages: kokoro-onnx, onnxruntime, etc):
+     ```
+     rmdir /s /q .venv
+     ```
+   - Create new venv with Python 3.12:
+     ```
+     C:\Python312\python.exe -m venv .venv
+     ```
+
+**3. Reinstall dependencies** — follow [step 4](#4-install-the-dependencies-in-order) above in exact order. All old packages are gone with the venv — no manual uninstall needed.
+
+**4. Update your `.env` file:**
+   - Remove: `TTS_MODEL`, `TTS_VOICES`, `ONNX_PROVIDER`
+   - Add: `HF_HUB_OFFLINE = "1"` (after first run)
+   - Add: `HF_HUB_DISABLE_SYMLINKS_WARNING = "1"`
+
+**5. Clean up old model files (optional):**
+   Move `assets/model*.onnx` and `assets/voices-v1.0.bin` to `assets/old/` or delete them.
+
+**6. First run must be online:**
+   - Comment out `HF_HUB_OFFLINE = "1"` in `.env`
+   - Process a document
+   - After download completes, uncomment `HF_HUB_OFFLINE = "1"`
+   - Future runs are fully offline
+   - Note: If you change the voices you must be in online mode for a first run of these voioces so the assets can be downloaded from Huggingface, after that they are cached. Unless you use the manual download of assets option (See **Manual download)
+
+**7. Install espeak-ng on Windows** (if not already):
+   Download `.msi` from https://github.com/espeak-ng/espeak-ng/releases
+
+## To set up and run from scratch
 
 ### 1. Install Electron
 ```
