@@ -24,9 +24,9 @@ from kokoro import KPipeline
 SAMPLE_RATE = 24000
 
 try:
-    from sl_utility import _preprocess_for_notes
+    from sl_utility import _clean_line_for_parsing, _preprocess_for_notes
 except ModuleNotFoundError:
-    from .sl_utility import _preprocess_for_notes  # type: ignore
+    from .sl_utility import _clean_line_for_parsing, _preprocess_for_notes  # type: ignore
 
 
 def _env_bitrate() -> str:
@@ -425,9 +425,19 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
         return None
 
     pos = int(pos)
+
+    # Clean prep_text to match the scanner's coordinate space.
+    # The scanner applies _clean_line_for_parsing + rstrip("\r") per line,
+    # and positions are character offsets into that cleaned text.
+    cleaned_prep_lines = [_clean_line_for_parsing(l.rstrip("\r")) for l in prep_text.split("\n")]
+    cleaned_prep = "\n".join(cleaned_prep_lines)
+
+    if pos >= len(cleaned_prep):
+        return None
+
     ctx_start = max(0, pos - 70)
-    ctx_end = min(len(prep_text), pos + 10)
-    ctx = prep_text[ctx_start:ctx_end]
+    ctx_end = min(len(cleaned_prep), pos + 10)
+    ctx = cleaned_prep[ctx_start:ctx_end]
     ctx_norm = _normalize_ws(ctx)
     if len(ctx_norm) < 15:
         return None
@@ -446,6 +456,8 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
         core_words = words
 
     raw_norm = _normalize_ws(raw_text)
+
+    match = None
     for num_words in range(min(len(core_words), 8), 2, -1):
         search_words = core_words[-num_words:]
         pattern = r"\s+".join(re.escape(w) for w in search_words)
@@ -459,7 +471,11 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
         elif len(matches) > 1:
             match = matches[-1]
             break
-    else:
+
+    if match is None:
+        match = _find_anchor_by_marker_fallback(raw_text, fn)
+
+    if match is None:
         return None
 
     raw_pos = 0
@@ -474,6 +490,50 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
         raw_pos += 1
 
     return raw_pos
+
+
+_SUPERSCRIPT_DIGITS = {"0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3",
+                      "4": "\u2074", "5": "\u2075", "6": "\u2076", "7": "\u2077",
+                      "8": "\u2078", "9": "\u2079"}
+
+
+def _find_anchor_by_marker_fallback(raw_text: str, fn: dict) -> Optional[Any]:
+    marker = fn.get("marker")
+    if not marker:
+        return None
+
+    marker_str = str(marker).strip()
+    if not marker_str:
+        return None
+
+    raw_norm = _normalize_ws(raw_text)
+
+    superscript_marker = "".join(_SUPERSCRIPT_DIGITS.get(ch, ch) for ch in marker_str)
+
+    patterns = []
+    for m in (marker_str, superscript_marker):
+        patterns.append(re.escape("(" + m + ")"))
+        patterns.append(re.escape("[" + m + "]"))
+        patterns.append(re.escape("( " + m + " )"))
+        patterns.append(re.escape("( " + m + ")"))
+        patterns.append(re.escape("(" + m + " )"))
+        patterns.append(re.escape("[ " + m + " ]"))
+
+    best_match = None
+    best_count = float("inf")
+
+    for pattern in patterns:
+        try:
+            found = list(re.finditer(pattern, raw_norm))
+        except re.error:
+            continue
+        if 0 < len(found) < best_count:
+            best_count = len(found)
+            best_match = found[-1]
+        elif len(found) == 1 and best_count == 1:
+            best_match = found[0]
+
+    return best_match
 
 
 def _find_sentence_end(text: str, pos: int) -> int:
