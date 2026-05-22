@@ -1,4 +1,4 @@
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
     function escapeHtml(text) {
         return String(text || '')
             .replace(/&/g, '&amp;')
@@ -49,6 +49,52 @@ document.addEventListener('DOMContentLoaded', function() {
     let searchMatches = [];
     let currentMatchIdx = -1;
 
+    let appDataCache = null;
+    let savePositionTimer = null;
+
+    async function loadAppData() {
+        if (!appDataCache) {
+            appDataCache = await window.electronAPI.loadAppData();
+            if (!appDataCache) {
+                appDataCache = { preferences: {}, sessions: [] };
+            }
+            if (!appDataCache.preferences) appDataCache.preferences = {};
+            if (!appDataCache.sessions) appDataCache.sessions = [];
+        }
+        return appDataCache;
+    }
+
+    async function saveAppData() {
+        await window.electronAPI.saveAppData(appDataCache);
+    }
+
+    function normalizePath(p) {
+        return (p || '').replace(/\//g, '\\').replace(/\\+$/, '');
+    }
+
+    function ensureSession(bookPath) {
+        const norm = normalizePath(bookPath);
+        let session = appDataCache.sessions.find(s => normalizePath(s.bookPath) === norm);
+        if (!session) {
+            const fname = bookPath.split(/[/\\]/).pop();
+            let baseFolder = fname.replace(/\s+/g, '_');
+            let folder = baseFolder;
+            let suffix = 2;
+            while (appDataCache.sessions.some(s => s.outputPath === `output\\${folder}`)) {
+                folder = `${baseFolder}_${suffix++}`;
+            }
+            session = { bookPath, outputPath: `output\\${folder}`, readingPositionMs: 0 };
+            appDataCache.sessions.push(session);
+        } else {
+            const idx = appDataCache.sessions.indexOf(session);
+            appDataCache.sessions.splice(idx, 1);
+            appDataCache.sessions.push(session);
+        }
+        return session;
+    }
+
+    await loadAppData();
+
     const voiceGroups = [
         { label: "British Female", lang: "en-gb", voices: ["bf_alice", "bf_emma", "bf_isabella", "bf_lily"] },
         { label: "British Male",   lang: "en-gb", voices: ["bm_daniel", "bm_fable", "bm_george", "bm_lewis"] },
@@ -63,8 +109,8 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     function populateVoiceDropdowns() {
-        const mainVoice = localStorage.getItem('starlistener_mainVoice') || 'bf_emma';
-        const footnoteVoice = localStorage.getItem('starlistener_footnoteVoice') || 'bm_george';
+        const mainVoice = appDataCache.preferences.mainVoice || 'bf_emma';
+        const footnoteVoice = appDataCache.preferences.footnoteVoice || 'bm_george';
 
         [mainVoiceSelect, footnoteVoiceSelect].forEach(select => {
             select.innerHTML = '';
@@ -88,23 +134,28 @@ document.addEventListener('DOMContentLoaded', function() {
     populateVoiceDropdowns();
 
     mainVoiceSelect.addEventListener('change', () => {
-        localStorage.setItem('starlistener_mainVoice', mainVoiceSelect.value);
+        appDataCache.preferences.mainVoice = mainVoiceSelect.value;
+        saveAppData();
     });
 
     footnoteVoiceSelect.addEventListener('change', () => {
-        localStorage.setItem('starlistener_footnoteVoice', footnoteVoiceSelect.value);
+        appDataCache.preferences.footnoteVoice = footnoteVoiceSelect.value;
+        saveAppData();
     });
 
     footnoteModeSelect.addEventListener('change', () => {
-        localStorage.setItem('starlistener_footnoteMode', footnoteModeSelect.value);
+        appDataCache.preferences.footnoteMode = footnoteModeSelect.value;
+        saveAppData();
     });
 
     playbackSpeedSelect.addEventListener('change', () => {
-        localStorage.setItem('starlistener_playbackSpeed', playbackSpeedSelect.value);
+        appDataCache.preferences.playbackSpeed = playbackSpeedSelect.value;
+        saveAppData();
     });
 
     markerProfileSelect.addEventListener('change', () => {
-        localStorage.setItem('starlistener_markerProfile', markerProfileSelect.value);
+        appDataCache.preferences.markerProfile = markerProfileSelect.value;
+        saveAppData();
     });
 
     async function playVoiceTest(voice, label) {
@@ -150,11 +201,16 @@ document.addEventListener('DOMContentLoaded', function() {
         playVoiceTest(footnoteVoiceSelect.value, 'footnotes');
     });
 
-    const savedSpeed = localStorage.getItem('starlistener_playbackSpeed');
+    const savedSpeed = appDataCache.preferences.playbackSpeed;
     if (savedSpeed) playbackSpeedSelect.value = savedSpeed;
 
     scanBtn.addEventListener('click', async () => {
         if (!currentFilePath) return;
+
+        if (!(await window.electronAPI.fileExists(currentFilePath))) {
+            output.innerText = 'File not found \u2014 using cached data';
+            return;
+        }
 
         const marker_profile = markerProfileSelect ? markerProfileSelect.value : 'auto_heur';
         const payload = JSON.stringify({
@@ -171,12 +227,10 @@ document.addEventListener('DOMContentLoaded', function() {
             lastScanResults = Array.isArray(parsed) ? parsed : (parsed.rows || []);
             if (lastScanResults.length > 0) {
                 if (currentFilePath) {
-                    const fname = currentFilePath.split(/[/\\]/).pop();
-                    const safeFolder = fname.replace(/\s+/g, '_');
-                    const stem = fname.replace(/\.[^.]+$/, '').replace(/\s+/g, '_');
-                    const nmPath = `output\\${safeFolder}\\${stem}_notemarkers.json`;
-                    window.electronAPI.writeJsonFile(nmPath, lastScanResults);
-                    window.electronAPI.saveSessionInfo({ bookPath: currentFilePath });
+                    const session = ensureSession(currentFilePath);
+                    const p = getBookDataPaths(session.outputPath);
+                    window.electronAPI.writeJsonFile(p.nmPath, lastScanResults);
+                    saveAppData();
                 }
                 footnoteOptionsEl.style.display = 'flex';
                 footnoteModeSelect.disabled = false;
@@ -207,8 +261,10 @@ document.addEventListener('DOMContentLoaded', function() {
         const footnoteMode = (!footnoteModeSelect.disabled && lastScanResults && lastScanResults.length > 0)
             ? footnoteModeSelect.value
             : 'as_is';
+        const session = ensureSession(currentFilePath);
         const payload = JSON.stringify({
             epub_path: currentFilePath,
+            output_path: session.outputPath,
             voice: voice,
             footnote_voice: footnoteVoiceSelect.value || 'bm_george',
             speed: parseFloat(playbackSpeedSelect.value) || 1.0,
@@ -270,13 +326,8 @@ document.addEventListener('DOMContentLoaded', function() {
             output.innerText = `Speech generated (${result.duration_s}s, ${result.sample_rate}Hz${wc})`;
 
             if (currentFilePath) {
-                const sessionData = {
-                    bookPath: currentFilePath,
-                    audioPath: result.output_path || '',
-                    timestampsPath: result.timestamps_path || '',
-                    readingPositionMs: readingPositionMs || 0,
-                };
-                window.electronAPI.saveSessionInfo(sessionData);
+                ensureSession(currentFilePath).readingPositionMs = readingPositionMs || 0;
+                saveAppData();
             }
         } catch (e) {
             const msg = (e && e.message) ? e.message : String(e);
@@ -289,7 +340,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadBtn.addEventListener('click', async () => {
         const filePath = await window.electronAPI.openFile();
         if (filePath) {
-            currentFilePath = filePath;
+            currentFilePath = normalizePath(filePath);
             lastScanResults = null;
             document.getElementById('footnoteContainer').innerHTML = '';
             chapterList.innerHTML = '';
@@ -317,9 +368,11 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             const basename = filePath.split(/[/\\]/).pop();
             currentFileEl.innerText = basename;
-            window.electronAPI.saveSessionInfo({ bookPath: currentFilePath });
+            ensureSession(currentFilePath);
+            saveAppData();
+            const bookExists = await window.electronAPI.fileExists(currentFilePath);
             scanBtn.disabled = false;
-            ttsBtn.disabled = false;
+            ttsBtn.disabled = !bookExists;
             loadBookData(currentFilePath);
         }
     });
@@ -735,7 +788,26 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function saveReadingPosition() {
         if (!currentFilePath) return;
-        localStorage.setItem('starlistener_reading_' + currentFilePath, readingPositionMs);
+        ensureSession(currentFilePath).readingPositionMs = readingPositionMs;
+    }
+
+    function scheduleSave() {
+        saveReadingPosition();
+        if (!savePositionTimer) {
+            savePositionTimer = setTimeout(() => {
+                savePositionTimer = null;
+                saveAppData();
+            }, 5000);
+        }
+    }
+
+    function flushSave() {
+        if (savePositionTimer) {
+            clearTimeout(savePositionTimer);
+            savePositionTimer = null;
+        }
+        saveReadingPosition();
+        saveAppData();
     }
 
     function applyReadMarks() {
@@ -751,7 +823,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         const rb = document.getElementById('resumeBtn');
         if (rb) rb.innerHTML = readingPositionMs > 0 ? 'Resume<br>Reading' : 'Begin<br>Reading';
-        saveReadingPosition();
     }
 
     function startHighlighting(audio, timestamps) {
@@ -813,6 +884,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 } else if (isResumePlayback) {
                     readingPositionMs = ms;
                     applyReadMarks();
+                    scheduleSave();
                 }
             }
         }
@@ -841,11 +913,13 @@ document.addEventListener('DOMContentLoaded', function() {
             const btn = document.getElementById('playPauseBtn');
             if (btn) btn.textContent = '\u25B6 Play';
             isResumePlayback = false;
+            flushSave();
         });
         audio.addEventListener('ended', function() {
             const btn = document.getElementById('playPauseBtn');
             if (btn) btn.textContent = '\u25B6 Play';
             isResumePlayback = false;
+            flushSave();
         });
 
         audio.addEventListener('seeking', function() {
@@ -867,6 +941,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!audio) return;
         const el = e.target.closest('.word-span') || e.target.closest('.para-block') || e.target.closest('[data-start]');
         if (!el) return;
+        isResumePlayback = false;
         audio.currentTime = parseFloat(el.dataset.start) / 1000;
     });
 
@@ -894,12 +969,14 @@ document.addEventListener('DOMContentLoaded', function() {
         isResumePlayback = true;
         readingPositionMs = Math.max(a.currentTime * 1000, readingPositionMs);
         applyReadMarks();
+        scheduleSave();
         a.play();
     });
 
     function skip(seconds) {
         const a = getTtsAudio();
         if (!a) return;
+        isResumePlayback = false;
         a.currentTime = Math.max(0, Math.min(a.duration || 0, a.currentTime + seconds));
     }
 
@@ -1065,19 +1142,20 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    function getBookDataPaths(bookPath) {
-        const fname = bookPath.split(/[/\\]/).pop();
-        const safeFolder = fname.replace(/\s+/g, '_');
-        const stem = fname.replace(/\.[^.]+$/, '').replace(/\s+/g, '_');
+    function getBookDataPaths(outputPath) {
+        const folderName = outputPath.split(/[/\\]/).pop();
+        const stem = folderName.replace(/\.[^.]+$/, '');
         return {
-            nmPath: `output\\${safeFolder}\\${stem}_notemarkers.json`,
-            tsPath: `output\\${safeFolder}\\${stem}_timestamps.json`,
-            mp3Path: `output\\${safeFolder}\\${stem}.mp3`,
+            nmPath: `${outputPath}\\${stem}_notemarkers.json`,
+            tsPath: `${outputPath}\\${stem}_timestamps.json`,
+            mp3Path: `${outputPath}\\${stem}.mp3`,
         };
     }
 
     async function loadBookData(bookPath) {
-        const p = getBookDataPaths(bookPath);
+        const session = appDataCache.sessions.find(s => normalizePath(s.bookPath) === normalizePath(bookPath));
+        if (!session) return;
+        const p = getBookDataPaths(session.outputPath);
 
         try {
             const scanResults = await window.electronAPI.readJsonFile(p.nmPath);
@@ -1085,7 +1163,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 lastScanResults = scanResults;
                 footnoteOptionsEl.style.display = 'flex';
                 footnoteModeSelect.disabled = false;
-                const fMode = localStorage.getItem('starlistener_footnoteMode');
+                const fMode = appDataCache.preferences.footnoteMode;
                 if (fMode) footnoteModeSelect.value = fMode;
                 showFootnotes(JSON.stringify(scanResults));
             }
@@ -1117,29 +1195,28 @@ document.addEventListener('DOMContentLoaded', function() {
 
     async function restoreSession() {
         try {
-            const saved = await window.electronAPI.loadSessionInfo();
-            if (!saved || !saved.bookPath) return;
+            const sessions = appDataCache.sessions;
+            if (!sessions || !sessions.length) return;
+            const saved = sessions[sessions.length - 1];
 
-            currentFilePath = saved.bookPath;
+            currentFilePath = normalizePath(saved.bookPath);
             const basename = currentFilePath.split(/[/\\]/).pop();
             currentFileEl.innerText = basename;
+            const bookExists = await window.electronAPI.fileExists(currentFilePath);
             scanBtn.disabled = false;
-            ttsBtn.disabled = false;
+            ttsBtn.disabled = !bookExists;
 
-            const voice = localStorage.getItem('starlistener_mainVoice');
-            const footnoteVoice = localStorage.getItem('starlistener_footnoteVoice');
+            const voice = appDataCache.preferences.mainVoice;
+            const footnoteVoice = appDataCache.preferences.footnoteVoice;
             if (voice) mainVoiceSelect.value = voice;
             if (footnoteVoice) footnoteVoiceSelect.value = footnoteVoice;
 
-            const savedMarker = localStorage.getItem('starlistener_markerProfile');
+            const savedMarker = appDataCache.preferences.markerProfile;
             if (savedMarker) markerProfileSelect.value = savedMarker;
-            const savedSpeed = localStorage.getItem('starlistener_playbackSpeed');
+            const savedSpeed = appDataCache.preferences.playbackSpeed;
             if (savedSpeed) playbackSpeedSelect.value = savedSpeed;
 
             readingPositionMs = saved.readingPositionMs || 0;
-            const localKey = 'starlistener_reading_' + saved.bookPath;
-            const localPos = localStorage.getItem(localKey);
-            if (localPos != null) readingPositionMs = Number(localPos);
 
             await loadBookData(currentFilePath);
         } catch (e) {
@@ -1148,5 +1225,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     restoreSession();
+
+    window.addEventListener('beforeunload', flushSave);
 
 });

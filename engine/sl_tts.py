@@ -616,9 +616,14 @@ def generate_tts(
     else:
         return {"error": "No text or voice segments provided"}
 
-    out_dir = _get_output_dir(epub_path)
+    if output_path:
+        out_dir = _get_project_root() / output_path
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(output_path).stem or "book"
+    else:
+        out_dir = _get_output_dir(epub_path)
 
-    stem = _book_stem(epub_path) if epub_path else "tts"
+        stem = _book_stem(epub_path) if epub_path else "tts"
 
     wav_file = str(out_dir / f"{stem}.wav")
     sf.write(wav_file, samples, sample_rate)
@@ -669,6 +674,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     lang = "en-gb"
     output_filename: Optional[str] = None
     epub_path: Optional[str] = None
+    output_path_override: Optional[str] = None
     word_count: Optional[int] = None
     footnotes: Optional[list] = None
     footnote_mode = "as_is"
@@ -685,6 +691,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 lang = str(payload.get("lang", lang))
                 output_filename = payload.get("output_filename") or payload.get("output")
                 epub_path = payload.get("epub_path")
+                output_path_override = payload.get("output_path")
                 footnotes = payload.get("footnotes")
                 footnote_mode = str(payload.get("footnote_mode", footnote_mode))
                 footnote_voice_name = str(payload.get("footnote_voice", footnote_voice_name))
@@ -747,6 +754,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         voice=voice,
         speed=speed,
         lang=lang,
+        output_path=output_path_override,
         voice_segments=voice_segments,
         footnote_voice=footnote_voice_name,
         epub_path=epub_path,

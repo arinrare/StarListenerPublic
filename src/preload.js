@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readJsonFile: (path) => ipcRenderer.invoke('read-json-file', path),
   writeJsonFile: (path, data) => ipcRenderer.invoke('write-json-file', path, data),
   resolvePath: (path) => ipcRenderer.invoke('resolve-path', path),
-  saveSessionInfo: (data) => ipcRenderer.invoke('save-session-info', data),
-  loadSessionInfo: () => ipcRenderer.invoke('load-session-info')
+  saveAppData: (data) => ipcRenderer.invoke('save-app-data', data),
+  loadAppData: () => ipcRenderer.invoke('load-app-data'),
+  fileExists: (path) => ipcRenderer.invoke('file-exists', path)
 });

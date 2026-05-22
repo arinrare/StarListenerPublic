@@ -92,24 +92,36 @@ ipcMain.handle('open-file', async () => {
 
 ipcMain.handle('read-json-file', async (_event, filePath) => {
   const resolved = path.isAbsolute(filePath) ? filePath : path.join(app.getAppPath(), filePath);
-  return JSON.parse(fs.readFileSync(resolved, 'utf8'));
+  try {
+    return JSON.parse(fs.readFileSync(resolved, 'utf8'));
+  } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    throw e;
+  }
 });
 
 ipcMain.handle('resolve-path', async (_event, relPath) => {
   return path.resolve(app.getAppPath(), relPath);
 });
 
-const sessionPath = path.join(app.getPath('userData'), 'starlistener_session.json');
-
-ipcMain.handle('save-session-info', async (_event, data) => {
-  fs.writeFileSync(sessionPath, JSON.stringify(data || null), 'utf8');
-});
-
-ipcMain.handle('load-session-info', async () => {
-  if (fs.existsSync(sessionPath)) {
-    return JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+ipcMain.handle('load-app-data', async () => {
+  const resolved = path.join(app.getAppPath(), 'output', 'starlistener.json');
+  if (fs.existsSync(resolved)) {
+    return JSON.parse(fs.readFileSync(resolved, 'utf8'));
   }
   return null;
+});
+
+ipcMain.handle('file-exists', async (_event, filePath) => {
+  const resolved = path.isAbsolute(filePath) ? filePath : path.join(app.getAppPath(), filePath);
+  return fs.existsSync(resolved);
+});
+
+ipcMain.handle('save-app-data', async (_event, data) => {
+  const resolved = path.join(app.getAppPath(), 'output', 'starlistener.json');
+  const dir = path.dirname(resolved);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(resolved, JSON.stringify(data, null, 2), 'utf8');
 });
 
 ipcMain.handle('write-json-file', async (_event, filePath, data) => {
