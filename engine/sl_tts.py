@@ -189,6 +189,55 @@ def _apply_pronunciations(text: str, pron_dict: dict) -> str:
     return pattern.sub(replacer, text)
 
 
+_MARKUP_RE = re.compile(r"\[([^\]]+)\]\([^\)]*\)")
+
+
+def _strip_pronunciation_markup(text: str) -> str:
+    return _MARKUP_RE.sub(r"\1", text)
+
+
+_WORD_TOKEN_RE = re.compile(
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9'\-\u2010\u2011\u2018\u2019]*[a-zA-Z0-9])?"
+    r"|[a-zA-Z0-9]"
+    r"|[^a-zA-Z0-9]"
+)
+
+
+def _tokenize_words(text: str) -> list:
+    tokens = []
+    for chunk in text.split():
+        tokens.extend(_WORD_TOKEN_RE.findall(chunk))
+    return tokens
+
+
+def _resolve_display_word(token_text: str, lower_text: str, orig_text: str, char_pos: list) -> str:
+    token_lower = token_text.lower().replace("\u2019", "'").replace("\u2018", "'")
+
+    # Primary: find the token text in the lowercased original at or after char_pos
+    idx = lower_text.find(token_lower, char_pos[0])
+    if idx >= 0:
+        char_pos[0] = idx + len(token_lower)
+        return orig_text[idx:idx + len(token_lower)]
+
+    # Fallback: strip leading/trailing non-alnum chars and try the core word
+    core = token_lower
+    lead = ""
+    trail = ""
+    while core and not core[0].isalnum():
+        lead += core[0]
+        core = core[1:]
+    while core and not core[-1].isalnum():
+        trail = core[-1] + trail
+        core = core[:-1]
+    if core and core != token_lower:
+        idx = lower_text.find(core, char_pos[0])
+        if idx >= 0:
+            char_pos[0] = idx + len(core)
+            return lead + orig_text[idx:idx + len(core)] + trail
+
+    return token_text
+
+
 _PIPELINE_CACHE: dict = {}
 
 
@@ -222,14 +271,18 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
         if not para:
             continue
         para = _apply_pronunciations(para, pron_dict)
+        orig_clean = _strip_pronunciation_markup(para)
+        lower_clean = orig_clean.lower().replace("\u2019", "'").replace("\u2018", "'")
+
         sys.stderr.write(json.dumps({"status": "paragraph", "value": f"{pi+1}/{total}"}) + "\n")
         sys.stderr.flush()
 
         para_samples = 0
         para_word_ts = []
         sub_offset_ms = 0.0
+        char_pos_ref = [0]
 
-        for result in pipeline(para, voice=voice, speed=speed):
+        for result in pipeline(para.lower(), voice=voice, speed=speed):
             audio_tensor = result.audio
             sub_samples = 0
             if audio_tensor is not None:
@@ -239,8 +292,9 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
                 all_audio.append(audio_np)
             if hasattr(result, "tokens") and result.tokens:
                 for t in result.tokens:
+                    display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
                     para_word_ts.append({
-                        "word": t.text + (t.whitespace if t.whitespace else ""),
+                        "word": display_word + (t.whitespace if t.whitespace else ""),
                         "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
                         "end_ms": round(t.end_ts * 1000 + sub_offset_ms),
                     })
@@ -298,12 +352,15 @@ def _generate_segmented_audio(
             if not para:
                 continue
             para = _apply_pronunciations(para, pron_dict)
+            orig_clean = _strip_pronunciation_markup(para)
+            lower_clean = orig_clean.lower().replace("\u2019", "'").replace("\u2018", "'")
 
             para_samples = 0
             para_word_ts = []
             sub_offset_ms = 0.0
+            char_pos_ref = [0]
 
-            for result in pipeline(para, voice=voice, speed=speed):
+            for result in pipeline(para.lower(), voice=voice, speed=speed):
                 audio_tensor = result.audio
                 sub_samples = 0
                 if audio_tensor is not None:
@@ -314,8 +371,9 @@ def _generate_segmented_audio(
                 if hasattr(result, "tokens") and result.tokens:
                     for t in result.tokens:
                         if t.start_ts is not None and t.end_ts is not None:
+                            display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
                             para_word_ts.append({
-                                "word": t.text + (t.whitespace if t.whitespace else ""),
+                                "word": display_word + (t.whitespace if t.whitespace else ""),
                                 "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
                                 "end_ms": round(t.end_ts * 1000 + sub_offset_ms),
                             })
