@@ -12,7 +12,6 @@ import ebooklib
 import numpy as np
 from bs4 import BeautifulSoup
 from ebooklib import epub
-import soundfile as sf
 import torch
 
 warnings.filterwarnings("ignore", message=".*dropout.*num_layers.*")
@@ -103,21 +102,6 @@ def _extract_epub_text(epub_path: str, word_limit: Optional[int] = None) -> Tupl
 def _get_project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
-
-def _wav_to_mp3(wav_path: str, mp3_path: str, bitrate: str) -> bool:
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", wav_path,
-        "-codec:a", "libmp3lame",
-        "-b:a", bitrate,
-        mp3_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        sys.stderr.write(f"[tts] ffmpeg failed: {result.stderr.strip()}\n")
-        sys.stderr.flush()
-        return False
-    return True
 
 
 def _book_stem(epub_path: Optional[str]) -> str:
@@ -256,15 +240,41 @@ def _lang_to_code(lang: str) -> str:
     return "a"
 
 
-def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float, pron_dict: dict):
+def _assemble_timestamps_json(tmp_path, ts_file, display_text, stem):
+    with open(ts_file, "w", encoding="utf-8") as out:
+        out.write('{"timestamps":[')
+        first = True
+        with open(tmp_path, "r", encoding="utf-8") as tmp:
+            for line in tmp:
+                entry = json.loads(line)
+                for w in entry["w"]:
+                    if not first:
+                        out.write(",")
+                    out.write(json.dumps(w, ensure_ascii=False))
+                    first = False
+
+        out.write('],"paragraphs":[')
+        first = True
+        with open(tmp_path, "r", encoding="utf-8") as tmp:
+            for line in tmp:
+                entry = json.loads(line)
+                if not first:
+                    out.write(",")
+                out.write(json.dumps(entry["p"], ensure_ascii=False))
+                first = False
+
+        out.write("],")
+        out.write('"full_text":' + json.dumps(display_text, ensure_ascii=False) + ",")
+        out.write('"book_stem":' + json.dumps(stem, ensure_ascii=False) + "}")
+
+
+def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float, pron_dict: dict, stream, ts_handle):
     pipeline = _get_pipeline(lang)
     paras = _split_natural_paragraphs(text)
     total = len(paras)
-    all_audio = []
-    all_word_ts = []
-    all_para_ts = []
     cum_ms = 0.0
     sr = SAMPLE_RATE
+    total_samples = 0
 
     for pi, para in enumerate(paras):
         para = re.sub(r"\s+", " ", para).strip()
@@ -289,7 +299,8 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
                 audio_np = audio_tensor.cpu().numpy()
                 sub_samples = len(audio_np)
                 para_samples += sub_samples
-                all_audio.append(audio_np)
+                total_samples += sub_samples
+                stream.write(audio_np.astype(np.float32).tobytes())
             if hasattr(result, "tokens") and result.tokens:
                 for t in result.tokens:
                     if t.start_ts is not None and t.end_ts is not None:
@@ -304,20 +315,19 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
         para_start_ms = cum_ms
         para_end_ms = para_start_ms + (para_samples / sr * 1000.0)
 
+        para_entry = {
+            "text": para,
+            "start_ms": round(para_start_ms),
+            "end_ms": round(para_end_ms),
+        }
         if para_word_ts:
             for wt in para_word_ts:
                 wt["start_ms"] = round(wt["start_ms"] + para_start_ms)
                 wt["end_ms"] = round(wt["end_ms"] + para_start_ms)
-            all_word_ts.extend(para_word_ts)
-        all_para_ts.append({
-            "text": para,
-            "start_ms": round(para_start_ms),
-            "end_ms": round(para_end_ms),
-        })
+        ts_handle.write(json.dumps({"w": para_word_ts, "p": para_entry}, ensure_ascii=False) + "\n")
         cum_ms = para_end_ms
 
-    audio = np.concatenate(all_audio) if all_audio else np.array([], dtype=np.float32)
-    return audio, sr, all_word_ts, all_para_ts
+    return total_samples, sr
 
 
 def _generate_segmented_audio(
@@ -327,16 +337,16 @@ def _generate_segmented_audio(
     speed: float,
     lang: str,
     pron_dict: dict,
+    stream,
+    ts_handle,
 ):
     lang_code = _lang_to_code(lang)
     pipeline = _get_pipeline(lang)
-    all_audio = []
-    all_word_ts = []
-    all_para_ts = []
     cum_ms = 0.0
     sr = SAMPLE_RATE
     total = len(segments)
     seg_idx = 0
+    total_samples = 0
 
     for voice_type, text in segments:
         seg_idx += 1
@@ -368,7 +378,8 @@ def _generate_segmented_audio(
                     audio_np = audio_tensor.cpu().numpy()
                     sub_samples = len(audio_np)
                     para_samples += sub_samples
-                    all_audio.append(audio_np)
+                    total_samples += sub_samples
+                    stream.write(audio_np.astype(np.float32).tobytes())
                 if hasattr(result, "tokens") and result.tokens:
                     for t in result.tokens:
                         if t.start_ts is not None and t.end_ts is not None:
@@ -383,20 +394,19 @@ def _generate_segmented_audio(
             para_start_ms = cum_ms
             para_end_ms = para_start_ms + (para_samples / sr * 1000.0)
 
+            para_entry = {
+                "text": para,
+                "start_ms": round(para_start_ms),
+                "end_ms": round(para_end_ms),
+            }
             if para_word_ts:
                 for wt in para_word_ts:
                     wt["start_ms"] = round(wt["start_ms"] + para_start_ms)
                     wt["end_ms"] = round(wt["end_ms"] + para_start_ms)
-                all_word_ts.extend(para_word_ts)
-            all_para_ts.append({
-                "text": para,
-                "start_ms": round(para_start_ms),
-                "end_ms": round(para_end_ms),
-            })
+            ts_handle.write(json.dumps({"w": para_word_ts, "p": para_entry}, ensure_ascii=False) + "\n")
             cum_ms = para_end_ms
 
-    audio = np.concatenate(all_audio) if all_audio else np.array([], dtype=np.float32)
-    return audio, sr, all_word_ts, all_para_ts
+    return total_samples, sr
 
 
 def _chunk_text(full_text: str) -> list:
@@ -716,60 +726,75 @@ def generate_tts(
     sys.stderr.write(json.dumps({"status": "provider", "value": str(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")}) + "\n")
     sys.stderr.flush()
 
-    pron_dict = _load_pronunciations(_env_pronunciations())
-
-    if voice_segments:
-        sys.stderr.write(json.dumps({"status": "debug", "path": "segmented", "count": len(voice_segments)}) + "\n")
-        sys.stderr.flush()
-        samples, sample_rate, word_ts, para_ts = _generate_segmented_audio(
-            voice_segments, voice, footnote_voice, speed, lang, pron_dict
-        )
-        display_text = full_text or " ".join(st for _, st in voice_segments)
-    elif text:
-        sys.stderr.write(json.dumps({"status": "debug", "path": "paragraphs", "len": len(text)}) + "\n")
-        sys.stderr.flush()
-        display_text = full_text or text
-        samples, sample_rate, word_ts, para_ts = _generate_tts_from_paragraphs(
-            display_text, lang, voice, speed, pron_dict
-        )
-    else:
-        return {"error": "No text or voice segments provided"}
-
     if output_path:
         out_dir = _get_project_root() / output_path
         out_dir.mkdir(parents=True, exist_ok=True)
         stem = Path(output_path).stem or "book"
     else:
         out_dir = _get_output_dir(epub_path)
-
         stem = _book_stem(epub_path) if epub_path else "tts"
 
-    wav_file = str(out_dir / f"{stem}.wav")
-    sf.write(wav_file, samples, sample_rate)
-
     mp3_file = str(out_dir / f"{stem}.mp3")
-    bitrate = _env_bitrate()
-    if _wav_to_mp3(wav_file, mp3_file, bitrate):
-        if os.path.exists(wav_file):
-            os.remove(wav_file)
-        out_file = mp3_file
-    else:
-        out_file = wav_file
-
     ts_file = str(out_dir / f"{stem}_timestamps.json")
-    with open(ts_file, "w", encoding="utf-8") as f:
-        json.dump({"timestamps": word_ts, "paragraphs": para_ts, "full_text": display_text, "book_stem": stem}, f, ensure_ascii=False)
+    bitrate = _env_bitrate()
+    pron_dict = _load_pronunciations(_env_pronunciations())
 
-    duration_s = round(len(samples) / sample_rate, 2)
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-i", "pipe:0",
+        "-codec:a", "libmp3lame", "-b:a", bitrate,
+        mp3_file,
+    ]
+    ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    ts_tmp_path = str(out_dir / f"{stem}_ts_tmp.jsonl")
+    ts_handle = open(ts_tmp_path, "w", encoding="utf-8")
+
+    if voice_segments:
+        sys.stderr.write(json.dumps({"status": "debug", "path": "segmented", "count": len(voice_segments)}) + "\n")
+        sys.stderr.flush()
+        total_samples, sample_rate = _generate_segmented_audio(
+            voice_segments, voice, footnote_voice, speed, lang, pron_dict, ffmpeg_proc.stdin, ts_handle
+        )
+        display_text = full_text or " ".join(st for _, st in voice_segments)
+    elif text:
+        sys.stderr.write(json.dumps({"status": "debug", "path": "paragraphs", "len": len(text)}) + "\n")
+        sys.stderr.flush()
+        display_text = full_text or text
+        total_samples, sample_rate = _generate_tts_from_paragraphs(
+            display_text, lang, voice, speed, pron_dict, ffmpeg_proc.stdin, ts_handle
+        )
+    else:
+        ffmpeg_proc.kill()
+        ffmpeg_proc.wait()
+        ts_handle.close()
+        os.remove(ts_tmp_path)
+        return {"error": "No text or voice segments provided"}
+
+    ts_handle.close()
+    ffmpeg_proc.stdin.close()
+    returncode = ffmpeg_proc.wait()
+    if returncode != 0:
+        if os.path.exists(ts_tmp_path):
+            os.remove(ts_tmp_path)
+        stderr_output = ffmpeg_proc.stderr.read().strip() if ffmpeg_proc.stderr else ""
+        if stderr_output:
+            sys.stderr.write(f"[tts] ffmpeg failed: {stderr_output}\n")
+            sys.stderr.flush()
+        return {"error": f"ffmpeg encoding failed with code {returncode}"}
+
+    _assemble_timestamps_json(ts_tmp_path, ts_file, display_text, stem)
+    os.remove(ts_tmp_path)
+
+    duration_s = round(total_samples / sample_rate, 2)
+    word_count = len(display_text.split()) if display_text else 0
     return {
         "book_stem": stem,
-        "output_path": str(Path(out_file).resolve()),
+        "output_path": str(Path(mp3_file).resolve()),
         "timestamps_path": str(Path(ts_file).resolve()),
         "sample_rate": sample_rate,
         "duration_s": duration_s,
-        "word_timestamps": word_ts,
-        "paragraph_timestamps": para_ts,
-        "full_text": display_text,
+        "word_count": word_count,
     }
 
 

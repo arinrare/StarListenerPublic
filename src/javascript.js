@@ -314,12 +314,20 @@ document.addEventListener('DOMContentLoaded', async function() {
             audio.style.cssText = 'margin-top: 12px; width: 100%;';
             document.getElementById('audioContainer').appendChild(audio);
 
-            if (result.paragraph_timestamps && result.paragraph_timestamps.length > 0) {
-                renderTextDisplay(result.full_text, result.word_timestamps, result.paragraph_timestamps);
-                startHighlighting(audio, result.paragraph_timestamps);
-            } else if (result.word_timestamps && result.word_timestamps.length > 0) {
-                renderTextDisplay(result.full_text, result.word_timestamps);
-                startHighlighting(audio, result.word_timestamps);
+            let tsData = null;
+            if (result.timestamps_path) {
+                try {
+                    tsData = await window.electronAPI.readJsonFile(result.timestamps_path);
+                } catch (e) {
+                    console.error('Failed to load timestamps:', e);
+                }
+            }
+            if (tsData && tsData.paragraphs && tsData.paragraphs.length > 0) {
+                renderTextDisplay(tsData.full_text, tsData.timestamps, tsData.paragraphs);
+                startHighlighting(audio, tsData.paragraphs);
+            } else if (tsData && tsData.timestamps && tsData.timestamps.length > 0) {
+                renderTextDisplay(tsData.full_text, tsData.timestamps);
+                startHighlighting(audio, tsData.timestamps);
             }
 
             const wc = result.word_count ? `, ${result.word_count} words` : '';

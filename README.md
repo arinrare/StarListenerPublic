@@ -13,6 +13,9 @@ https://www.python.org/downloads/
 - espeak-ng (Windows only)
 https://github.com/espeak-ng/espeak-ng/releases — download and run the `.msi` installer
 
+- ffmpeg (required for MP3 audio encoding)
+https://ffmpeg.org/download.html — install and ensure `ffmpeg` is on your system PATH
+
 
 ## Upgrading from the ONNX-based version
 
