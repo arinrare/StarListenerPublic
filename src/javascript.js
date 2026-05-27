@@ -36,6 +36,8 @@ document.addEventListener('DOMContentLoaded', async function() {
     const findNextBtn = document.getElementById('findNextBtn');
     const searchStatusEl = document.getElementById('searchStatus');
     const clearSearchBtn = document.getElementById('clearSearchBtn');
+    const matchCaseCheckbox = document.getElementById('matchCaseCheckbox');
+    const searchFromStartCheckbox = document.getElementById('searchFromStartCheckbox');
 
     let currentFilePath = null;
     let lastScanResults = null;
@@ -48,6 +50,7 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     let searchMatches = [];
     let currentMatchIdx = -1;
+    let lastBookPosEl = null;
 
     let appDataCache = null;
     let savePositionTimer = null;
@@ -132,6 +135,24 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
 
     populateVoiceDropdowns();
+
+    if (appDataCache.preferences.matchCase !== undefined) {
+        matchCaseCheckbox.checked = appDataCache.preferences.matchCase;
+    }
+    if (appDataCache.preferences.searchFromStart !== undefined) {
+        searchFromStartCheckbox.checked = appDataCache.preferences.searchFromStart;
+    }
+
+    matchCaseCheckbox.addEventListener('change', () => {
+        appDataCache.preferences.matchCase = matchCaseCheckbox.checked;
+        saveAppData();
+        if (searchInputEl.value.trim()) performSearch(searchInputEl.value);
+    });
+    searchFromStartCheckbox.addEventListener('change', () => {
+        appDataCache.preferences.searchFromStart = searchFromStartCheckbox.checked;
+        saveAppData();
+        if (searchInputEl.value.trim()) performSearch(searchInputEl.value);
+    });
 
     mainVoiceSelect.addEventListener('change', () => {
         appDataCache.preferences.mainVoice = mainVoiceSelect.value;
@@ -364,6 +385,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             readingPositionMs = 0;
             currentHighlightEl = null;
             allSpans = [];
+            lastBookPosEl = null;
             const tb = document.getElementById('transportBar');
             if (tb) tb.style.display = 'none';
             const existingAudio = document.getElementById('ttsAudio');
@@ -756,6 +778,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         searchBarEl.style.display = 'flex';
         clearSearchHighlights();
         searchInputEl.value = '';
+        lastBookPosEl = null;
 
         const hasWords = wordTimestamps && wordTimestamps.length > 0;
         const hasParas = paragraphTimestamps && paragraphTimestamps.length > 0;
@@ -951,6 +974,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         if (!el) return;
         isResumePlayback = false;
         audio.currentTime = parseFloat(el.dataset.start) / 1000;
+        lastBookPosEl = el;
     });
 
     const playPauseBtn = document.getElementById('playPauseBtn');
@@ -1019,13 +1043,38 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
 
     function goToMatch(idx) {
-        searchMatches.forEach(m => m.classList.remove('current'));
+        searchMatches.forEach(group => group.forEach(m => m.classList.remove('current')));
         if (idx >= 0 && idx < searchMatches.length) {
-            searchMatches[idx].classList.add('current');
-            searchMatches[idx].scrollIntoView({ block: 'center', behavior: 'smooth' });
+            searchMatches[idx].forEach(m => m.classList.add('current'));
+            searchMatches[idx][0].scrollIntoView({ block: 'center', behavior: 'smooth' });
             currentMatchIdx = idx;
+            updateLastBookPosFromMatch();
         }
         updateSearchUI();
+    }
+
+    function updateLastBookPosFromMatch() {
+        if (searchMatches.length > 0 && currentMatchIdx >= 0) {
+            const firstMark = searchMatches[currentMatchIdx][0];
+            const stableEl = firstMark.closest('.word-span, .para-block, .para-span, [data-start]');
+            if (stableEl) {
+                lastBookPosEl = stableEl;
+            }
+        }
+    }
+
+    function getElementCharOffset(el) {
+        if (!el || !textDisplayEl || !textDisplayEl.contains(el)) return 0;
+        const walker = document.createTreeWalker(textDisplayEl, NodeFilter.SHOW_TEXT);
+        let cumPos = 0;
+        let wn;
+        while ((wn = walker.nextNode())) {
+            if (el.contains(wn)) {
+                return cumPos;
+            }
+            cumPos += wn.textContent.length;
+        }
+        return 0;
     }
 
     function findNext() {
@@ -1047,7 +1096,8 @@ document.addEventListener('DOMContentLoaded', async function() {
 
         const rawQuery = query.trim();
         const escapedRegexStr = rawQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const regex = new RegExp(escapedRegexStr, 'gi');
+        const flags = 'g' + (matchCaseCheckbox.checked ? '' : 'i');
+        const regex = new RegExp(escapedRegexStr, flags);
 
         const walker = document.createTreeWalker(textDisplayEl, NodeFilter.SHOW_TEXT);
         const segments = [];
@@ -1076,12 +1126,28 @@ document.addEventListener('DOMContentLoaded', async function() {
             return;
         }
 
+        let lastPosOffset = 0;
+        if (!searchFromStartCheckbox.checked && lastBookPosEl && textDisplayEl.contains(lastBookPosEl)) {
+            lastPosOffset = getElementCharOffset(lastBookPosEl);
+        }
+
+        let effectiveRanges = matchRanges;
+        if (!searchFromStartCheckbox.checked && lastPosOffset > 0) {
+            effectiveRanges = matchRanges.filter(mr => mr.start >= lastPosOffset);
+            if (effectiveRanges.length === 0) {
+                searchStatusEl.textContent = 'No matches after cursor';
+                findPrevBtn.disabled = true;
+                findNextBtn.disabled = true;
+                return;
+            }
+        }
+
         for (let i = segments.length - 1; i >= 0; i--) {
             const seg = segments[i];
 
             const boundaries = new Set([seg.start, seg.end]);
             let hasOverlap = false;
-            for (const mr of matchRanges) {
+            for (const mr of effectiveRanges) {
                 if (mr.start < seg.end && mr.end > seg.start) {
                     hasOverlap = true;
                     boundaries.add(Math.max(mr.start, seg.start));
@@ -1103,9 +1169,11 @@ document.addEventListener('DOMContentLoaded', async function() {
                 const localB = b - segStart;
 
                 let inMatch = false;
-                for (const mr of matchRanges) {
-                    if (a >= mr.start && b <= mr.end) {
+                let matchIdx = -1;
+                for (let k = 0; k < effectiveRanges.length; k++) {
+                    if (a >= effectiveRanges[k].start && b <= effectiveRanges[k].end) {
                         inMatch = true;
+                        matchIdx = k;
                         break;
                     }
                 }
@@ -1113,6 +1181,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                 if (inMatch) {
                     const mk = document.createElement('mark');
                     mk.className = 'search-match';
+                    mk.dataset.matchIdx = matchIdx;
                     mk.textContent = text.slice(localA, localB);
                     frag.appendChild(mk);
                 } else {
@@ -1123,7 +1192,21 @@ document.addEventListener('DOMContentLoaded', async function() {
             seg.node.parentNode.replaceChild(frag, seg.node);
         }
 
-        searchMatches = [...textDisplayEl.querySelectorAll('mark.search-match')];
+        const allMarks = [...textDisplayEl.querySelectorAll('mark.search-match')];
+        const groups = [];
+        let curGroup = [], lastIdx = -1;
+        for (const m of allMarks) {
+            const mi = parseInt(m.dataset.matchIdx);
+            if (mi !== lastIdx) {
+                if (curGroup.length) groups.push(curGroup);
+                curGroup = [];
+                lastIdx = mi;
+            }
+            curGroup.push(m);
+        }
+        if (curGroup.length) groups.push(curGroup);
+        searchMatches = groups;
+
         if (searchMatches.length > 0) {
             currentMatchIdx = 0;
             goToMatch(0);
@@ -1223,6 +1306,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (savedMarker) markerProfileSelect.value = savedMarker;
             const savedSpeed = appDataCache.preferences.playbackSpeed;
             if (savedSpeed) playbackSpeedSelect.value = savedSpeed;
+
+            const savedMatchCase = appDataCache.preferences.matchCase;
+            if (savedMatchCase !== undefined) matchCaseCheckbox.checked = savedMatchCase;
+            const savedFromStart = appDataCache.preferences.searchFromStart;
+            if (savedFromStart !== undefined) searchFromStartCheckbox.checked = savedFromStart;
 
             readingPositionMs = saved.readingPositionMs || 0;
 

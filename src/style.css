@@ -294,6 +294,21 @@ button:disabled {
     white-space: nowrap;
 }
 
+.search-checkbox-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.85em;
+    color: #aaa;
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+}
+
+.search-checkbox-label input[type="checkbox"] {
+    cursor: pointer;
+}
+
 .text-display mark.search-match {
     background: #2196f3;
     color: #fff;
