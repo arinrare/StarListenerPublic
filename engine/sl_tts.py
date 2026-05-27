@@ -528,58 +528,52 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
     pos = fn.get("position")
     if pos is None or not isinstance(pos, (int, float)) or pos < 0:
         _fn_log("_find_anchor_in_raw", "bad_position", fn)
-        return None
+        pos = None
 
-    pos = int(pos)
+    if pos is not None:
+        pos = int(pos)
 
-    # Clean prep_text to match the scanner's coordinate space.
-    # The scanner applies _clean_line_for_parsing + rstrip("\r") per line,
-    # and positions are character offsets into that cleaned text.
     cleaned_prep_lines = [_clean_line_for_parsing(l.rstrip("\r")) for l in prep_text.split("\n")]
     cleaned_prep = "\n".join(cleaned_prep_lines)
 
-    if pos >= len(cleaned_prep):
-        _fn_log("_find_anchor_in_raw", "pos_out_of_bounds", fn, extra={"pos": pos, "cleaned_len": len(cleaned_prep)})
-        return None
-
-    ctx_start = max(0, pos - 70)
-    ctx_end = min(len(cleaned_prep), pos + 10)
-    ctx = cleaned_prep[ctx_start:ctx_end]
-    ctx_norm = _normalize_ws(ctx)
-    if len(ctx_norm) < 15:
-        _fn_log("_find_anchor_in_raw", "context_too_short", fn, extra={"ctx_len": len(ctx_norm)})
-        return None
-
-    words = [w.strip("'\"-.,;:!?()[]") for w in ctx_norm.split()]
-    words = [w for w in words if len(w) > 1 and all(c.isalpha() or c in "-'" for c in w)]
-    if not words:
-        _fn_log("_find_anchor_in_raw", "no_alpha_words", fn)
-        return None
-
-    # Use progressively fewer words from the middle of the context
-    # (avoid edge words that are affected by preprocessing artifacts)
-    mid_start = len(words) // 4
-    mid_end = len(words) * 3 // 4
-    core_words = words[mid_start:mid_end] if mid_end > mid_start else words
-    if len(core_words) < 3:
-        core_words = words
-
-    raw_norm = _normalize_ws(raw_text)
+    try_word_match = False
+    core_words = None
+    if pos is not None and 0 <= pos < len(cleaned_prep):
+        ctx_start = max(0, pos - 70)
+        ctx_end = min(len(cleaned_prep), pos + 10)
+        ctx = cleaned_prep[ctx_start:ctx_end]
+        ctx_norm = _normalize_ws(ctx)
+        if len(ctx_norm) >= 15:
+            words = [w.strip("'\"-.,;:!?()[]") for w in ctx_norm.split()]
+            words = [w for w in words if len(w) > 1 and all(c.isalpha() or c in "-'" for c in w)]
+            if words:
+                mid_start = len(words) // 4
+                mid_end = len(words) * 3 // 4
+                core_words = words[mid_start:mid_end] if mid_end > mid_start else words
+                if len(core_words) < 3:
+                    core_words = words
+                try_word_match = True
+        if not try_word_match and pos is not None and pos >= len(cleaned_prep):
+            _fn_log("_find_anchor_in_raw", "pos_sentinel", fn, extra={"pos": pos, "cleaned_len": len(cleaned_prep)})
+    elif pos is not None:
+        _fn_log("_find_anchor_in_raw", "pos_sentinel", fn, extra={"pos": pos, "cleaned_len": len(cleaned_prep)})
 
     match = None
-    for num_words in range(min(len(core_words), 8), 2, -1):
-        search_words = core_words[-num_words:]
-        pattern = r"\s+".join(re.escape(w) for w in search_words)
-        try:
-            matches = list(re.finditer(pattern, raw_norm))
-        except re.error:
-            continue
-        if len(matches) == 1:
-            match = matches[0]
-            break
-        elif len(matches) > 1:
-            match = matches[-1]
-            break
+    if try_word_match and core_words:
+        raw_norm = _normalize_ws(raw_text)
+        for num_words in range(min(len(core_words), 8), 2, -1):
+            search_words = core_words[-num_words:]
+            pattern = r"\s+".join(re.escape(w) for w in search_words)
+            try:
+                matches = list(re.finditer(pattern, raw_norm))
+            except re.error:
+                continue
+            if len(matches) == 1:
+                match = matches[0]
+                break
+            elif len(matches) > 1:
+                match = matches[-1]
+                break
 
     if match is None:
         match = _find_anchor_by_marker_fallback(raw_text, fn)
@@ -899,7 +893,7 @@ def generate_tts(
         "-codec:a", "libmp3lame", "-b:a", bitrate,
         mp3_file,
     ]
-    ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
     ts_tmp_path = str(out_dir / f"{stem}_ts_tmp.jsonl")
     ts_handle = open(ts_tmp_path, "w", encoding="utf-8")
@@ -931,9 +925,9 @@ def generate_tts(
     if returncode != 0:
         if os.path.exists(ts_tmp_path):
             os.remove(ts_tmp_path)
-        stderr_output = ffmpeg_proc.stderr.read().strip() if ffmpeg_proc.stderr else ""
+        stderr_output = ffmpeg_proc.stderr.read() if ffmpeg_proc.stderr else b""
         if stderr_output:
-            sys.stderr.write(f"[tts] ffmpeg failed: {stderr_output}\n")
+            sys.stderr.write(f"[tts] ffmpeg failed: {stderr_output.decode(errors='replace').strip()}\n")
             sys.stderr.flush()
         return {"error": f"ffmpeg encoding failed with code {returncode}"}
 
