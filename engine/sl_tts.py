@@ -292,12 +292,13 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
                 all_audio.append(audio_np)
             if hasattr(result, "tokens") and result.tokens:
                 for t in result.tokens:
-                    display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
-                    para_word_ts.append({
-                        "word": display_word + (t.whitespace if t.whitespace else ""),
-                        "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
-                        "end_ms": round(t.end_ts * 1000 + sub_offset_ms),
-                    })
+                    if t.start_ts is not None and t.end_ts is not None:
+                        display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
+                        para_word_ts.append({
+                            "word": display_word + (t.whitespace if t.whitespace else ""),
+                            "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
+                            "end_ms": round(t.end_ts * 1000 + sub_offset_ms),
+                        })
             sub_offset_ms += sub_samples / sr * 1000.0
 
         para_start_ms = cum_ms
