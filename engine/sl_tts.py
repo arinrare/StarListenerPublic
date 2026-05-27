@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -327,6 +328,7 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
                 wt["start_ms"] = round(wt["start_ms"] + para_start_ms)
                 wt["end_ms"] = round(wt["end_ms"] + para_start_ms)
         ts_handle.write(json.dumps({"w": para_word_ts, "p": para_entry}, ensure_ascii=False) + "\n")
+        ts_handle.flush()
         cum_ms = para_end_ms
 
     return total_samples, sr
@@ -407,6 +409,7 @@ def _generate_segmented_audio(
                     wt["start_ms"] = round(wt["start_ms"] + para_start_ms)
                     wt["end_ms"] = round(wt["end_ms"] + para_start_ms)
             ts_handle.write(json.dumps({"w": para_word_ts, "p": para_entry}, ensure_ascii=False) + "\n")
+            ts_handle.flush()
             cum_ms = para_end_ms
 
     return total_samples, sr
@@ -499,8 +502,13 @@ def _clean_text_like_scanner(text: str) -> str:
         .replace("\u2009", " ")
         .replace("\ufeff", "")
         .replace("\u200b", "")
+        .replace("\u200c", "")
+        .replace("\u200d", "")
+        .replace("\u200e", "")
+        .replace("\u200f", "")
         .replace("\u2060", "")
         .replace("\uFEFF", "")
+        .replace("\u00ad", "")
     )
 
 
@@ -510,7 +518,7 @@ def _map_cleaned_pos_to_raw(cleaned: str, raw_text: str, cleaned_pos: int) -> in
     for ch in raw_text:
         if cleaned_idx >= cleaned_pos:
             break
-        if ch in ("\u200b", "\u2060", "\ufeff", "\uFEFF"):
+        if ch in ("\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u2060", "\ufeff", "\uFEFF", "\u00ad"):
             raw_pos += 1
             continue
         if ch in ("\u00A0", "\u202F", "\u2009"):
@@ -550,11 +558,8 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
             words = [w.strip("'\"-.,;:!?()[]") for w in ctx_norm.split()]
             words = [w for w in words if len(w) > 1 and all(c.isalpha() or c in "-'" for c in w)]
             if words:
-                mid_start = len(words) // 4
-                mid_end = len(words) * 3 // 4
-                core_words = words[mid_start:mid_end] if mid_end > mid_start else words
-                if len(core_words) < 3:
-                    core_words = words
+                take_last = max(3, min(len(words), 8))
+                core_words = words[-take_last:]
                 try_word_match = True
         if not try_word_match and pos is not None and pos >= len(cleaned_prep):
             _fn_log("_find_anchor_in_raw", "pos_sentinel", fn, extra={"pos": pos, "cleaned_len": len(cleaned_prep)})
@@ -566,7 +571,7 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
         raw_norm = _normalize_ws(raw_text)
         for num_words in range(min(len(core_words), 8), 2, -1):
             search_words = core_words[-num_words:]
-            pattern = r"\s+".join(re.escape(w) for w in search_words)
+            pattern = r"\W{0,15}".join(re.escape(w) for w in search_words)
             try:
                 matches = list(re.finditer(pattern, raw_norm))
             except re.error:
@@ -723,6 +728,9 @@ def _find_anchor_by_context(raw_text: str, fn: dict) -> Optional[int]:
     cleaned_raw = _clean_text_like_scanner(raw_text)
     cleaned_norm = _normalize_ws(cleaned_raw)
 
+    ctx = unicodedata.normalize("NFC", ctx)
+    cleaned_norm = unicodedata.normalize("NFC", cleaned_norm)
+
     for radius in (80, 60, 40, 25):
         start = max(0, marker_pos_in_ctx - radius)
         end = min(len(ctx), marker_pos_in_ctx + radius)
@@ -780,18 +788,29 @@ def _build_voice_segments(
     prep_text = _preprocess_for_notes(raw_text)
 
     anchors = []
+    skipped_no_pos = []
+    skipped_no_def = []
     for fn in footnotes:
         pos = _find_anchor_in_raw(raw_text, prep_text, fn)
         if pos is not None:
             anchors.append((pos, fn))
+        else:
+            skipped_no_pos.append(fn)
 
     if not anchors:
+        sys.stderr.write(json.dumps({
+            "status": "debug", "func": "_build_voice_segments",
+            "msg": "no_anchors", "total_fns": len(footnotes),
+            "skipped_no_pos": len(skipped_no_pos),
+        }) + "\n")
+        sys.stderr.flush()
         return [("prose", _remove_notes_block(raw_text))]
 
     anchors.sort(key=lambda x: x[0])
 
     segments = []
     last_pos = 0
+    inserted = 0
 
     for pos, fn in anchors:
         sentence_end = _find_sentence_end(raw_text, pos)
@@ -804,12 +823,24 @@ def _build_voice_segments(
         definition = fn.get("suggested_definition", "")
         if definition and str(definition).strip():
             segments.append(("footnote", f" Footnote {marker}: {definition}. End of footnote. "))
+            inserted += 1
+        else:
+            skipped_no_def.append(fn)
 
         last_pos = sentence_end + 1
 
     remaining = _remove_notes_block(raw_text[last_pos:])
     if remaining.strip():
         segments.append(("prose", remaining))
+
+    sys.stderr.write(json.dumps({
+        "status": "debug", "func": "_build_voice_segments",
+        "total_fns": len(footnotes), "anchored": len(anchors),
+        "inserted": inserted,
+        "skipped_no_pos": len(skipped_no_pos),
+        "skipped_no_def": len(skipped_no_def),
+    }) + "\n")
+    sys.stderr.flush()
 
     return segments
 
