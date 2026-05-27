@@ -25,9 +25,9 @@ from kokoro import KPipeline
 SAMPLE_RATE = 24000
 
 try:
-    from sl_utility import _clean_line_for_parsing, _normalize_marker, _preprocess_for_notes, _safe_text
+    from sl_utility import _clean_line_for_parsing, _def_line_regex, _normalize_marker, _preprocess_for_notes, _safe_text
 except ModuleNotFoundError:
-    from .sl_utility import _clean_line_for_parsing, _normalize_marker, _preprocess_for_notes, _safe_text  # type: ignore
+    from .sl_utility import _clean_line_for_parsing, _def_line_regex, _normalize_marker, _preprocess_for_notes, _safe_text  # type: ignore
 
 
 def _env_bitrate() -> str:
@@ -486,7 +486,20 @@ def _remove_notes_block(text: str) -> str:
     lines = text.split("\n")
     for i, line in enumerate(lines):
         if _NOTES_BLOCK_RE.match(line.strip()):
-            return "\n".join(lines[:i]).strip()
+            result = lines[:i]
+            j = i + 1
+            def_re = _def_line_regex()
+            while j < len(lines):
+                stripped = lines[j].rstrip("\r")
+                if not stripped.strip():
+                    j += 1
+                    continue
+                if def_re.match(stripped):
+                    j += 1
+                    continue
+                break
+            result.extend(lines[j:])
+            return "\n".join(result).strip()
     return text
 
 
