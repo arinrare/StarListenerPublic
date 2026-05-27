@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -301,6 +302,7 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
                 para_samples += sub_samples
                 total_samples += sub_samples
                 stream.write(audio_np.astype(np.float32).tobytes())
+                stream.flush()
             if hasattr(result, "tokens") and result.tokens:
                 for t in result.tokens:
                     if t.start_ts is not None and t.end_ts is not None:
@@ -380,6 +382,7 @@ def _generate_segmented_audio(
                     para_samples += sub_samples
                     total_samples += sub_samples
                     stream.write(audio_np.astype(np.float32).tobytes())
+                    stream.flush()
                 if hasattr(result, "tokens") and result.tokens:
                     for t in result.tokens:
                         if t.start_ts is not None and t.end_ts is not None:
@@ -895,6 +898,18 @@ def generate_tts(
     ]
     ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
+    stderr_chunks: List[bytes] = []
+    def _drain_stderr() -> None:
+        try:
+            while True:
+                chunk = ffmpeg_proc.stderr.read(4096)  # type: ignore[union-attr]
+                if not chunk:
+                    break
+                stderr_chunks.append(chunk)
+        except Exception:
+            pass
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+
     ts_tmp_path = str(out_dir / f"{stem}_ts_tmp.jsonl")
     ts_handle = open(ts_tmp_path, "w", encoding="utf-8")
 
@@ -925,7 +940,7 @@ def generate_tts(
     if returncode != 0:
         if os.path.exists(ts_tmp_path):
             os.remove(ts_tmp_path)
-        stderr_output = ffmpeg_proc.stderr.read() if ffmpeg_proc.stderr else b""
+        stderr_output = b"".join(stderr_chunks) if stderr_chunks else b""
         if stderr_output:
             sys.stderr.write(f"[tts] ffmpeg failed: {stderr_output.decode(errors='replace').strip()}\n")
             sys.stderr.flush()
