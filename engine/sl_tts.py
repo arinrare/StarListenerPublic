@@ -23,9 +23,9 @@ from kokoro import KPipeline
 SAMPLE_RATE = 24000
 
 try:
-    from sl_utility import _clean_line_for_parsing, _preprocess_for_notes
+    from sl_utility import _clean_line_for_parsing, _normalize_marker, _preprocess_for_notes, _safe_text
 except ModuleNotFoundError:
-    from .sl_utility import _clean_line_for_parsing, _preprocess_for_notes  # type: ignore
+    from .sl_utility import _clean_line_for_parsing, _normalize_marker, _preprocess_for_notes, _safe_text  # type: ignore
 
 
 def _env_bitrate() -> str:
@@ -488,9 +488,46 @@ def _normalize_ws(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _clean_text_like_scanner(text: str) -> str:
+    return (
+        text
+        .replace("\u00A0", " ")
+        .replace("\u202F", " ")
+        .replace("\u2009", " ")
+        .replace("\ufeff", "")
+        .replace("\u200b", "")
+        .replace("\u2060", "")
+        .replace("\uFEFF", "")
+    )
+
+
+def _map_cleaned_pos_to_raw(cleaned: str, raw_text: str, cleaned_pos: int) -> int:
+    raw_pos = 0
+    cleaned_idx = 0
+    for ch in raw_text:
+        if cleaned_idx >= cleaned_pos:
+            break
+        if ch in ("\u200b", "\u2060", "\ufeff", "\uFEFF"):
+            raw_pos += 1
+            continue
+        if ch in ("\u00A0", "\u202F", "\u2009"):
+            cleaned_idx += 1
+            raw_pos += 1
+            continue
+        if ch.isspace():
+            if raw_pos == 0 or not raw_text[raw_pos - 1].isspace():
+                cleaned_idx += 1
+            raw_pos += 1
+        else:
+            cleaned_idx += 1
+            raw_pos += 1
+    return raw_pos
+
+
 def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int]:
     pos = fn.get("position")
     if pos is None or not isinstance(pos, (int, float)) or pos < 0:
+        _fn_log("_find_anchor_in_raw", "bad_position", fn)
         return None
 
     pos = int(pos)
@@ -502,6 +539,7 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
     cleaned_prep = "\n".join(cleaned_prep_lines)
 
     if pos >= len(cleaned_prep):
+        _fn_log("_find_anchor_in_raw", "pos_out_of_bounds", fn, extra={"pos": pos, "cleaned_len": len(cleaned_prep)})
         return None
 
     ctx_start = max(0, pos - 70)
@@ -509,11 +547,13 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
     ctx = cleaned_prep[ctx_start:ctx_end]
     ctx_norm = _normalize_ws(ctx)
     if len(ctx_norm) < 15:
+        _fn_log("_find_anchor_in_raw", "context_too_short", fn, extra={"ctx_len": len(ctx_norm)})
         return None
 
     words = [w.strip("'\"-.,;:!?()[]") for w in ctx_norm.split()]
     words = [w for w in words if len(w) > 1 and all(c.isalpha() or c in "-'" for c in w)]
     if not words:
+        _fn_log("_find_anchor_in_raw", "no_alpha_words", fn)
         return None
 
     # Use progressively fewer words from the middle of the context
@@ -544,21 +584,44 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
     if match is None:
         match = _find_anchor_by_marker_fallback(raw_text, fn)
 
-    if match is None:
-        return None
+    if match is not None:
+        raw_pos = 0
+        norm_idx = 0
+        for ch in raw_text:
+            if norm_idx >= match.end():
+                break
+            if not ch.isspace():
+                norm_idx += 1
+            elif raw_pos == 0 or (raw_pos > 0 and not raw_text[raw_pos - 1].isspace()):
+                norm_idx += 1
+            raw_pos += 1
+        return raw_pos
 
-    raw_pos = 0
-    norm_idx = 0
-    for ch in raw_text:
-        if norm_idx >= match.end():
-            break
-        if not ch.isspace():
-            norm_idx += 1
-        elif raw_pos == 0 or (raw_pos > 0 and not raw_text[raw_pos - 1].isspace()):
-            norm_idx += 1
-        raw_pos += 1
+    ctx_pos = _find_anchor_by_context(raw_text, fn)
+    if ctx_pos is not None:
+        return ctx_pos
 
-    return raw_pos
+    _fn_log("_find_anchor_in_raw", "all_methods_failed", fn)
+    return None
+
+
+def _fn_log(func: str, reason: str, fn: dict, extra: dict = None) -> None:
+    try:
+        info = {
+            "status": "debug",
+            "func": func,
+            "reason": reason,
+            "marker": fn.get("marker"),
+            "position": fn.get("position"),
+            "chapter": fn.get("chapter_label") or fn.get("chapter_name", ""),
+            "confidence": fn.get("confidence_score"),
+        }
+        if extra:
+            info.update(extra)
+        sys.stderr.write(json.dumps(info) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 _SUPERSCRIPT_DIGITS = {"0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3",
@@ -576,6 +639,7 @@ def _find_anchor_by_marker_fallback(raw_text: str, fn: dict) -> Optional[Any]:
         return None
 
     raw_norm = _normalize_ws(raw_text)
+    cleaned_norm = _clean_text_like_scanner(raw_norm)
 
     superscript_marker = "".join(_SUPERSCRIPT_DIGITS.get(ch, ch) for ch in marker_str)
 
@@ -588,21 +652,111 @@ def _find_anchor_by_marker_fallback(raw_text: str, fn: dict) -> Optional[Any]:
         patterns.append(re.escape("(" + m + " )"))
         patterns.append(re.escape("[ " + m + " ]"))
 
+    if marker_str.isdigit():
+        esc = re.escape(marker_str)
+        patterns.append(r"(?<=\w)" + esc + r"(?=\s|[.,;:!?'\u2019\u201D\)\]\}]|$)")
+    elif len(marker_str) == 1 and marker_str.isalpha():
+        esc = re.escape(marker_str)
+        patterns.append(r"(?<=\w)" + esc + r"(?=\s|[.,;:!?'\u2019\u201D\)\]\}]|$)")
+
     best_match = None
     best_count = float("inf")
+    best_text = None
 
     for pattern in patterns:
         try:
-            found = list(re.finditer(pattern, raw_norm))
+            found = list(re.finditer(pattern, cleaned_norm))
         except re.error:
             continue
-        if 0 < len(found) < best_count:
-            best_count = len(found)
+        count = len(found)
+        if count == 0:
+            continue
+        if count < best_count:
+            best_count = count
             best_match = found[-1]
-        elif len(found) == 1 and best_count == 1:
+            best_text = cleaned_norm[best_match.start():best_match.end()]
+        elif count == 1 and best_count == 1:
             best_match = found[0]
+            best_text = cleaned_norm[best_match.start():best_match.end()]
 
-    return best_match
+    if best_match is not None and best_text:
+        try:
+            orig_found = list(re.finditer(re.escape(best_text), raw_norm))
+            if len(orig_found) == 1:
+                return orig_found[0]
+            if len(orig_found) > 1:
+                pos_approx = int(fn.get("position", 0) or 0)
+                best_dist = float("inf")
+                best_orig = None
+                for m in orig_found:
+                    dist = abs(m.start() - pos_approx)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_orig = m
+                return best_orig
+        except re.error:
+            pass
+
+    return None
+
+
+def _find_anchor_by_context(raw_text: str, fn: dict) -> Optional[int]:
+    ctx = fn.get("context")
+    if not ctx or not isinstance(ctx, str):
+        return None
+
+    ctx = _clean_text_like_scanner(_safe_text(ctx))
+    if len(ctx) < 12:
+        return None
+
+    marker_raw = fn.get("marker_raw") or fn.get("marker", "")
+    marker_raw = _safe_text(str(marker_raw))
+    cleaned_marker = _clean_text_like_scanner(marker_raw)
+    marker_norm = _normalize_marker(str(fn.get("marker", "")))
+
+    marker_pos_in_ctx = ctx.find(cleaned_marker)
+    if marker_pos_in_ctx < 0:
+        for alt in ["(" + marker_norm + ")", "[" + marker_norm + "]", marker_norm]:
+            marker_pos_in_ctx = ctx.find(alt)
+            if marker_pos_in_ctx >= 0:
+                break
+    if marker_pos_in_ctx < 0:
+        marker_pos_in_ctx = len(ctx) // 2
+
+    cleaned_raw = _clean_text_like_scanner(raw_text)
+    cleaned_norm = _normalize_ws(cleaned_raw)
+
+    for radius in (80, 60, 40, 25):
+        start = max(0, marker_pos_in_ctx - radius)
+        end = min(len(ctx), marker_pos_in_ctx + radius)
+        snippet = ctx[start:end]
+        marker_offset_in_snippet = marker_pos_in_ctx - start
+        if len(snippet) < 15:
+            continue
+        try:
+            found = list(re.finditer(re.escape(snippet), cleaned_norm))
+        except re.error:
+            continue
+        if len(found) == 1:
+            marker_pos_cleaned = found[0].start() + marker_offset_in_snippet
+            raw_pos = _map_cleaned_pos_to_raw(cleaned_norm, raw_text, marker_pos_cleaned)
+            return raw_pos
+        if len(found) > 1:
+            best = None
+            best_dist = float("inf")
+            approx_pos = int(fn.get("position", 0) or 0)
+            for m in found:
+                candidate = m.start() + marker_offset_in_snippet
+                dist = abs(candidate - approx_pos)
+                if dist < best_dist:
+                    best_dist = dist
+                    best = m
+            if best is not None:
+                marker_pos_cleaned = best.start() + marker_offset_in_snippet
+                raw_pos = _map_cleaned_pos_to_raw(cleaned_norm, raw_text, marker_pos_cleaned)
+                return raw_pos
+
+    return None
 
 
 def _find_sentence_end(text: str, pos: int) -> int:
