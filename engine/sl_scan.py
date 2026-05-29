@@ -738,7 +738,20 @@ def _scan_text_blob_for_footnotes(
 # Main function to scan an EPUB file for footnotes, handling both inline and end-of-chapter/notes styles, and building a global id and marker map for cross-referencing.
 def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = None) -> str:
     options = options or ScanOptions()
-    book = epub.read_epub(epub_path)
+    _original_read_file = epub.EpubReader.read_file
+
+    def _patched_read_file(self, name):
+        try:
+            return _original_read_file(self, name)
+        except KeyError:
+            return b""
+
+    epub.EpubReader.read_file = _patched_read_file
+    try:
+        book = epub.read_epub(epub_path)
+    finally:
+        epub.EpubReader.read_file = _original_read_file
+
     all_doc_items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
 
     def _def_line_looks_like_combined_chapter_heading(line: str) -> bool:

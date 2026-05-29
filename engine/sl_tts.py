@@ -45,8 +45,24 @@ def _env_word_limit() -> Optional[int]:
     return None
 
 
+def _read_epub_safe(epub_path):
+    _original_read_file = epub.EpubReader.read_file
+
+    def _patched_read_file(self, name):
+        try:
+            return _original_read_file(self, name)
+        except KeyError:
+            return b""
+
+    epub.EpubReader.read_file = _patched_read_file
+    try:
+        return epub.read_epub(epub_path)
+    finally:
+        epub.EpubReader.read_file = _original_read_file
+
+
 def _extract_epub_text(epub_path: str, word_limit: Optional[int] = None) -> Tuple[str, int]:
-    book = epub.read_epub(epub_path)
+    book = _read_epub_safe(epub_path)
 
     all_docs = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
     docs_by_id = {}
@@ -859,7 +875,7 @@ def _build_voice_segments(
 
 
 def _extract_epub_items(epub_path: str) -> list:
-    book = epub.read_epub(epub_path)
+    book = _read_epub_safe(epub_path)
 
     all_docs = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
     docs_by_id: Dict[str, Any] = {}
