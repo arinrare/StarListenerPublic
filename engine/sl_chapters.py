@@ -10,7 +10,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 _TRAILING_FOOTNOTE_MARK_RE = re.compile(
-    r"\s*(?:\(\s*\d{1,3}\s*\)|\[\s*\d{1,3}\s*\]|[⁰¹²³⁴⁵⁶⁷⁸⁹]{1,4}|[\*†‡§])\s*$",
+    r"\s*(?:\(\s*\d{1,3}\s*\)|\[\s*\d{1,3}\s*\]|[⁰¹²³⁴⁵⁶⁷⁸⁹]{1,4}|[\*†‡§]+)\s*$",
     re.UNICODE,
 )
 

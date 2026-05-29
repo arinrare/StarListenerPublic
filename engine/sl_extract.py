@@ -425,7 +425,7 @@ def _assign_positions_to_soup_anchors(anchors: List[Dict[str, Any]], lines: List
                 # We mirror the extraction constraints to avoid grabbing arbitrary
                 # superscripts or definition-leading markers.
                 if sup_anchors:
-                    sup_allowed_re = re.compile(r"^(?:\d{1,3}|\*|ΓÇá|ΓÇí|┬º|[a-zA-Z])$")
+                    sup_allowed_re = re.compile(r"^(?:\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z])$")
 
                     def _sup_is_definition_marker(sup_tag, marker_norm: str) -> bool:
                         try:
@@ -870,13 +870,13 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
             marker_txt = m.group(1) if m else ""
 
         # Normalize common variants like "(10)" or "10.".
-        if marker_txt and not re.fullmatch(r"\d{1,3}|\*|ΓÇá|ΓÇí|┬º|[a-zA-Z]", marker_txt):
-            m = re.fullmatch(r"\s*[\(\[]?\s*(\d{1,3}|\*|ΓÇá|ΓÇí|┬º|[a-zA-Z])\s*[\)\]]?\s*\.?\s*", marker_txt)
+        if marker_txt and not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]", marker_txt):
+            m = re.fullmatch(r"\s*[\(\[]?\s*(\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z])\s*[\)\]]?\s*\.?\s*", marker_txt)
             if m:
                 marker_txt = m.group(1)
 
         # Only accept small marker-like texts.
-        if not re.fullmatch(r"\d{1,3}|\*|ΓÇá|ΓÇí|┬º|[a-zA-Z]", marker_txt or ""):
+        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]", marker_txt or ""):
             continue
 
         marker_norm = _normalize_marker(marker_txt)
@@ -960,7 +960,7 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         if not txt:
             continue
         # Keep only small digit markers or known symbols.
-        if not re.fullmatch(r"\d{1,3}|\*|ΓÇá|ΓÇí|┬º|[a-zA-Z]", txt):
+        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]", txt):
             continue
         marker_norm = _normalize_marker(txt)
         if not marker_norm:
@@ -1032,7 +1032,7 @@ def _harvest_specific_filepos_note_targets(soup: BeautifulSoup) -> Tuple[Dict[st
         if not a:
             continue
         mk_raw = _safe_text(a.get_text(" "))
-        if not re.fullmatch(r"\d{1,3}|\*|ΓÇá|ΓÇí|┬º|[a-zA-Z]", mk_raw or ""):
+        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]", mk_raw or ""):
             continue
 
         # Get full paragraph text and strip the marker prefix.
@@ -1088,7 +1088,7 @@ def _harvest_structured_notes_section_targets(soup: BeautifulSoup) -> Tuple[Dict
     if soup is None:
         return id_map, marker_defs
 
-    marker_text_re = re.compile(r"\d{1,3}|\*|[A-Za-z]", re.UNICODE)
+    marker_text_re = re.compile(r"\d{1,3}|\*+|[A-Za-z]", re.UNICODE)
     boundary_tag_names = {"h1", "h2", "h3", "h4", "h5", "h6", "title"}
     scanned_ids: set[int] = set()
 
@@ -1659,12 +1659,20 @@ def _extract_definitions_from_lines(lines: List[str], start_index: int) -> List[
     Handles multi-line definitions by accumulating lines until next marker line.
     """
 
+    # Pre-compute character offsets for each line so definitions carry a
+    # position that proximity-based pairing can use.
+    _line_offsets: List[int] = []
+    _off = 0
+    for _ln in lines:
+        _line_offsets.append(_off)
+        _off += len(_ln) + 1  # +1 for newline
+
     defs: list[dict] = []
     current = None
     double_numeric_marker_only_re = re.compile(r"^\s*(\d{1,3})\.\s*(\d{1,3})\.\s*$", re.UNICODE)
     page_ref_re = re.compile(r"^\s*p{1,2}\.\s*\d", re.IGNORECASE)
     marker_only_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*|ΓÇá|ΓÇí|┬º)\s*(?:\]|\))?\s*(?:[\]\)\.\:\-ΓÇö]\s*)?(?:Γå⌐|\u21A9)?\s*$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|ΓÇá+|ΓÇí+|┬º+)\s*(?:\]|\))?\s*(?:[\]\)\.\:\-ΓÇö]\s*)?(?:Γå⌐|\u21A9)?\s*$",
         re.UNICODE,
     )
     def_like_re = _def_line_regex()
@@ -1963,7 +1971,13 @@ def _extract_definitions_from_lines(lines: List[str], start_index: int) -> List[
     # Drop empty-text definitions (can occur with stray marker-only lines
     # at page/spine boundaries or when marker-only lines are separated from
     # their body by non-text artifacts).
-    return [d for d in defs if _safe_text(d.get("text") or "").strip()]
+    kept = [d for d in defs if _safe_text(d.get("text") or "").strip()]
+    # Populate char_position from line_index so proximity-based pairing can use it.
+    for d in kept:
+        li = d.get("line_index")
+        if isinstance(li, int) and 0 <= li < len(_line_offsets):
+            d["char_position"] = _line_offsets[li]
+    return kept
 
 
 def _extract_definitions_from_lines_scoped(
@@ -1973,6 +1987,13 @@ def _extract_definitions_from_lines_scoped(
     initial_chapter_token: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Like _extract_definitions_from_lines, but tags each definition with a chapter token."""
+
+    # Pre-compute character offsets for each line.
+    _line_offsets_scoped: List[int] = []
+    _off = 0
+    for _ln in lines:
+        _line_offsets_scoped.append(_off)
+        _off += len(_ln) + 1  # +1 for newline
 
     def _token_from_heading_line(line: str) -> Optional[int]:
         t = _safe_text(line)
@@ -2003,7 +2024,7 @@ def _extract_definitions_from_lines_scoped(
     double_numeric_marker_only_re = re.compile(r"^\s*(\d{1,3})\.\s*(\d{1,3})\.\s*$", re.UNICODE)
     page_ref_re = re.compile(r"^\s*p{1,2}\.\s*\d", re.IGNORECASE)
     marker_only_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*|ΓÇá|ΓÇí|┬º)\s*(?:\]|\))?\s*(?:[\]\)\.\:\-ΓÇö]\s*)?(?:Γå⌐|\u21A9)?\s*$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|ΓÇá+|ΓÇí+|┬º+)\s*(?:\]|\))?\s*(?:[\]\)\.\:\-ΓÇö]\s*)?(?:Γå⌐|\u21A9)?\s*$",
         re.UNICODE,
     )
     def_like_re = _def_line_regex()
@@ -2281,6 +2302,11 @@ def _extract_definitions_from_lines_scoped(
         current["text"] = _safe_text(current["text"])
         defs.append(current)
 
+    # Populate char_position from line_index.
+    for d in defs:
+        li = d.get("line_index")
+        if isinstance(li, int) and 0 <= li < len(_line_offsets_scoped):
+            d["char_position"] = _line_offsets_scoped[li]
     return defs
 
 
@@ -2304,7 +2330,7 @@ def _extract_anchors_from_text(text: str) -> List[Dict[str, Any]]:
             return "let_paren"
         if re.fullmatch(r"\[\s*[a-zA-Z]\s*\]", raw):
             return "let_bracket"
-        if raw in {"*", "ΓÇá", "ΓÇí", "┬º"}:
+        if re.fullmatch(r"[\*ΓÇáΓÇí┬º]+", raw):
             return "symbol"
         return "other"
 
@@ -2428,6 +2454,8 @@ def _pair_anchors_to_definitions(
     source_meta: Dict[str, Any],
     definitions_by_id: Optional[Dict[str, str]] = None,
     id_start: int = 0,
+    *,
+    forward_looking: bool = False,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Pair anchors to definitions using marker matching + AI fallback.
 
@@ -2791,18 +2819,65 @@ def _pair_anchors_to_definitions(
                     else:
                         match_method = "ai"
                 else:
-                    if occurrence_index < len(candidates) and anchor_total <= len(candidates):
-                        suggested_def = candidates[occurrence_index]["text"]
-                        confidence_score = 0.75
-                        confidence = "Medium (Order Match)"
-                        match_method = "marker_order"
-                    elif occurrence_index < len(candidates):
-                        suggested_def = candidates[occurrence_index]["text"]
-                        confidence_score = 0.55
-                        confidence = "Low (Marker/Order)"
-                        match_method = "marker_order_low"
-                    else:
-                        match_method = "ai"
+                    if forward_looking and candidates:
+                        # Sort candidates by line_index so we find the closest
+                        # definition AFTER the anchor, not just the first in
+                        # insertion order.
+                        al = a.get("line_index")
+                        if isinstance(al, (int, float)):
+                            sorted_cands = sorted(
+                                [c for c in candidates if isinstance(c.get("line_index"), (int, float))],
+                                key=lambda c: c.get("line_index", 0),
+                            )
+                            best, best_l = None, None
+                            for c in sorted_cands:
+                                cl = c.get("line_index")
+                                # Use a tolerance of 1 to compensate for ratio
+                                # rounding errors that cause definitions to
+                                # appear fractionally before their anchor.
+                                if isinstance(cl, (int, float)) and cl >= int(al) - 1:
+                                    if best is None or cl < best_l:
+                                        best, best_l = c, cl
+                            if best is not None:
+                                suggested_def = best.get("text")
+                                confidence_score = 0.75
+                                confidence = "Medium (Forward Match)"
+                                match_method = "forward_looking"
+                    if match_method == "none":
+                        if occurrence_index < len(candidates) and anchor_total <= len(candidates):
+                            suggested_def = candidates[occurrence_index]["text"]
+                            confidence_score = 0.75
+                            confidence = "Medium (Order Match)"
+                            match_method = "marker_order"
+                        elif occurrence_index < len(candidates):
+                            suggested_def = candidates[occurrence_index]["text"]
+                            confidence_score = 0.55
+                            confidence = "Low (Marker/Order)"
+                            match_method = "marker_order_low"
+                        else:
+                            # Too many anchors for strict order matching.
+                            # Fall back to proximity: pair with the candidate whose
+                            # char_position is nearest to (and ideally after) the anchor.
+                            anchor_pos = a.get("position")
+                            if isinstance(anchor_pos, (int, float)) and candidates:
+                                best = None
+                                best_dist = None
+                                for c in candidates:
+                                    cpos = c.get("char_position")
+                                    if isinstance(cpos, (int, float)):
+                                        dist = abs(cpos - int(anchor_pos))
+                                        if best is None or dist < best_dist:
+                                            best = c
+                                            best_dist = dist
+                                if best is not None and best_dist is not None and best_dist < 50000:
+                                    suggested_def = best.get("text")
+                                    confidence_score = 0.55
+                                    confidence = "Low (Proximity Match)"
+                                    match_method = "proximity_local"
+                                else:
+                                    match_method = "ai"
+                            else:
+                                match_method = "ai"
 
         item = {
             "type": "footnote",

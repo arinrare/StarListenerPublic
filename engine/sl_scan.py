@@ -89,6 +89,7 @@ try:
         _preprocess_for_notes,
         _def_line_regex,
         _marker_category_from_raw,
+        _normalize_marker,
     )
     from sl_heuristics import (
         anchor_is_probable_footnote,
@@ -104,6 +105,7 @@ except ModuleNotFoundError:  # pragma: no cover
         _preprocess_for_notes,
         _def_line_regex,
         _marker_category_from_raw,
+        _normalize_marker,
     )
     from .sl_heuristics import (  # type: ignore
         anchor_is_probable_footnote,
@@ -150,7 +152,7 @@ def _marker_family(marker_raw: Any, marker_norm: Any) -> str:
         return "numeric"
 
     # Common note symbols.
-    if raw2 in {"*", "†", "‡", "§"}:
+    if re.fullmatch(r"[\*†‡§]+", raw2):
         return "symbol"
 
     # Roman numerals (common in some books for notes/chapters).
@@ -968,7 +970,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         total_bidi_defs = 0
         referenced_def_ids: set[str] = set()
         anchor_files_with_bidi: set[int] = set()
-        _small_marker_re = re.compile(r"^\s*[\(\[]?\s*(?:\d{1,3}|\*|\u2020|\u2021|\u00a7|[a-zA-Z])\s*[\)\]]?\s*$", re.UNICODE)
+        _small_marker_re = re.compile(r"^\s*[\(\[]?\s*(?:\d{1,3}|\*+|\u2020+|\u2021+|\u00a7+|[a-zA-Z])\s*[\)\]]?\s*$", re.UNICODE)
 
         for idx, it in enumerate(items):
             try:
@@ -1208,7 +1210,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 return "letter_plain"
             if re.match(r"^[\(\[]\s*[A-Za-z]\s*[\)\]]\s*[\]\)\.:\-—]?\s+", t):
                 return "letter_wrapped"
-            if re.match(r"^[*†‡§]\s+", t):
+            if re.match(r"^(\*+|†+|‡+|§+)\s+", t):
                 return "symbol"
             return "other"
 
@@ -1508,13 +1510,67 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 tail_start = max(0, int(len(lines) * 0.6))
                 defs = _extract_definitions_from_lines_scoped(lines, tail_start, initial_chapter_token=None)
         else:
-            # Some EPUBs store note lists in separate files without a NOTES header or obvious filename.
-            # If there are many definition-like lines, parse from the first one.
-            def_like = [i for i, l in enumerate(lines) if _def_line_regex().match(l or "")]
-            # Also handle short continuation pages (e.g., only a couple of defs) that
-            # would otherwise be missed.
-            if len(def_like) >= 5:
-                defs = _extract_definitions_from_lines(lines, def_like[0])
+            # No identifiable notes section was found.  Instead of parsing the
+            # entire text body as a single notes block, use the EPUB's paragraph
+            # (&lt;p&gt;) structure to identify definitions.  A paragraph whose text
+            # starts with a symbol definition marker is a definition paragraph;
+            # everything else is prose.  This handles inline-definition EPUBs
+            # where each definition occupies its own &lt;p&gt; intermixed with prose.
+            def_re = _def_line_regex()
+            def_paragraphs: List[BeautifulSoup] = []
+            for p in soup.find_all("p"):
+                pt = _safe_text(p.get_text(" ") or "").strip()
+                if pt and def_re.match(pt):
+                    def_paragraphs.append(p)
+
+            if len(def_paragraphs) >= 5:
+                # Pattern for inline secondary definition markers within a shared &lt;p&gt;
+                # (e.g. "* Def1 ** Def2" — we want both as separate definitions).
+                _inline_next_marker_re = re.compile(
+                    r"(?:\s+|^)(\*+|†+|‡+|§+)\s+",
+                    re.UNICODE,
+                )
+
+                soup_defs: List[Dict[str, Any]] = []
+                for p in def_paragraphs:
+                    pt = _safe_text(p.get_text(" ") or "").strip()
+                    if not pt:
+                        continue
+
+                    # Extract primary definition from the paragraph start.
+                    m = def_re.match(pt)
+                    if not m:
+                        continue
+                    marker_norm = _normalize_marker(m.group(1))
+                    if re.fullmatch(r"[A-Za-z]", marker_norm):
+                        cat = _marker_category_from_raw(m.group(1))
+                        if cat not in {"let_paren", "let_bracket"}:
+                            continue
+                    body = _safe_text(m.group(2) or "").strip()
+
+                    # If the paragraph contains an inline secondary definition
+                    # (e.g. "** Slang: ..." after the first definition), extract
+                    # that too instead of absorbing it into the first definition.
+                    inline_split = _inline_next_marker_re.search(body)
+                    if inline_split:
+                        remainder = body[inline_split.end() :].strip()
+                        body = _safe_text(body[: inline_split.start()]).strip()
+                        # Parse the secondary definition from the remainder.
+                        m2 = def_re.match(inline_split.group(1) + " " + remainder)
+                        if m2:
+                            mk2 = _normalize_marker(m2.group(1))
+                            bd2 = _safe_text(m2.group(2) or "").strip()
+                            if bd2:
+                                soup_defs.append({
+                                    "marker": mk2,
+                                    "text": bd2,
+                                })
+
+                    soup_defs.append({
+                        "marker": marker_norm,
+                        "text": body,
+                    })
+                defs = soup_defs
             elif cont_start is not None:
                 defs = _extract_definitions_from_lines(lines, int(cont_start))
 
@@ -1523,7 +1579,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         # notes-header occurrences and parse definitions after each.
         try:
             marker_only_re = re.compile(
-                r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*|†|‡|§)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?\s*$",
+                r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?\s*$",
                 re.UNICODE,
             )
             def_like_re = _def_line_regex()
@@ -1699,7 +1755,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         # it's a pure footnote-definition page -- skip it (defs already harvested in Pass 1).
         if structured_footnote_epub:
             has_footnote_defs = bool(soup.select(".footnote, .footnotet, .noindent-x1"))
-            _small_marker_skip_re = re.compile(r"^\s*(?:\d{1,3}|\*|\u2020|\u2021|\u00a7|[a-zA-Z])\s*$", re.UNICODE)
+            _small_marker_skip_re = re.compile(r"^\s*(?:\d{1,3}|\*+|\u2020+|\u2021+|\u00a7+|[a-zA-Z])\s*$", re.UNICODE)
             has_prose_anchors = any(
                 _small_marker_skip_re.match(_safe_text(a.get_text(" ")).strip())
                 and "#" in _safe_text(a.get("href") or "").strip()
@@ -1884,7 +1940,104 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
             definitions = _filter_definitions_by_profile(definitions, allowed_categories)
         else:
             definitions = _extract_definitions_from_lines(lines, defs_start)
+
+            # When the primary notes-split heuristic found no notes section
+            # at all (split is None), the text-based extraction produces
+            # poor results for inline-definition EPUBs where definitions are
+            # scattered throughout the prose.  Use soup-level paragraph
+            # detection instead: a paragraph whose text starts with a symbol
+            # marker is a definition paragraph.
+            if split is None:
+                def_re2 = _def_line_regex()
+                _inline_next_marker_re = re.compile(
+                    r"(?:\s+|^)(\*+|†+|‡+|§+)\s+",
+                    re.UNICODE,
+                )
+                all_ps = list(soup.find_all("p"))
+                soup_defs2: List[Dict[str, Any]] = []
+
+                # ---- Pass 1: extract definitions from <p> tags that start
+                #              with a symbol marker. ----
+                # Each entry: (paragraph_index, marker, body)
+                raw_defs: List[Tuple[int, str, str]] = []
+                for pi, p in enumerate(all_ps):
+                    pt = _safe_text(p.get_text(" ") or "").strip()
+                    if not pt:
+                        continue
+                    # Fix 2: convert typographic markers like "**\u2022" to "***"
+                    # so _def_line_regex sees a valid separator after the marker.
+                    if pt.startswith("**\u2022"):
+                        pt = "*** " + pt[3:].strip()
+                    elif pt.startswith("**") and len(pt) > 2 and not pt[2].isalnum() and not pt[2].isspace():
+                        pt = "*** " + pt[3:].strip()
+                    m_start = def_re2.match(pt)
+                    if not m_start:
+                        continue
+                    marker_norm = _normalize_marker(m_start.group(1))
+                    if re.fullmatch(r"[A-Za-z]", marker_norm):
+                        cat = _marker_category_from_raw(m_start.group(1))
+                        if cat not in {"let_paren", "let_bracket"}:
+                            continue
+                    body = _safe_text(m_start.group(2) or "").strip()
+
+                    # Handle inline secondary definition inside same <p>.
+                    inline = _inline_next_marker_re.search(body)
+                    if inline:
+                        remainder = body[inline.end() :].strip()
+                        body = _safe_text(body[: inline.start()]).strip()
+                        m2 = def_re2.match(inline.group(1) + " " + remainder)
+                        if m2:
+                            mk2 = _normalize_marker(m2.group(1))
+                            bd2 = _safe_text(m2.group(2) or "").strip()
+                            if bd2:
+                                raw_defs.append((pi, mk2, bd2))
+                    raw_defs.append((pi, marker_norm, body))
+
+                if len(raw_defs) >= 5:
+                    # ---- Pass 2: merge continuation <p> tags.  Some EPUBs
+                    #     split a definition across consecutive <p> tags;
+                    #     the first carries the marker, the rest is plain
+                    #     text.  A continuation is a short (<80 chars) <p>
+                    #     that does not start with a definition marker.
+                    # ---------------------------------------------------------
+                    for di, (pi, mk, body) in enumerate(raw_defs):
+                        # Find where the NEXT definition starts.
+                        next_pi = None
+                        if di + 1 < len(raw_defs):
+                            next_pi = raw_defs[di + 1][0]
+
+                        # Scan forward for continuation <p> tags.
+                        for ci in range(pi + 1, min(pi + 3, len(all_ps))):
+                            if next_pi is not None and ci >= next_pi:
+                                break
+                            ct = _safe_text(all_ps[ci].get_text(" ") or "").strip()
+                            if not ct or def_re2.match(ct):
+                                break
+                            if len(ct) > 80:
+                                break
+                            if ct[0].isupper() and len(ct) > 40:
+                                break
+                            body += " " + ct
+
+                        soup_defs2.append({
+                            "marker": mk,
+                            "text": body,
+                            "line_index": pi + 1,
+                            "origin_index": chapter_index,
+                        })
+
+                if len(soup_defs2) >= 5:
+                    definitions = soup_defs2
             definitions = _filter_definitions_by_profile(definitions, allowed_categories)
+
+        # Build a set of definition body prefixes for the definition-header
+        # anchor filter (used later in the deduped filtering step).
+        _def_starts: set[str] = set()
+        if split is None:
+            for d in definitions:
+                txt = _safe_text((d.get("text") or "")).strip()
+                if len(txt) >= 15:
+                    _def_starts.add(txt[:40].lower())
 
         # Build section labels when multiple NOTES blocks exist in one spine item.
         # Use globally-assigned numbered labels: "NOTES Section 1", "NOTES Section 2", etc.
@@ -2656,6 +2809,60 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 continue
             seen.add(key)
             deduped.append(a)
+
+        # When definitions were extracted from soup-level paragraphs (split is None),
+        # filter out anchors whose context text RIGHT AFTER the marker matches a
+        # definition body start — this means the anchor is actually a definition header
+        # (e.g. the "*" at the start of "* Royal Flying Corps ..."), not a prose marker.
+        if _def_starts:
+            filtered: List[Dict[str, Any]] = []
+            for a in deduped:
+                ctx = (a.get("context") or "").strip()
+                mk_raw = (a.get("marker_raw") or "").strip()
+                if not mk_raw:
+                    filtered.append(a)
+                    continue
+                # Check every occurrence of the marker in the context.
+                # If any occurrence's following text looks like a definition
+                # body, this anchor is a definition header — skip it.
+                is_def_header = False
+                mk_len = len(mk_raw)
+                pos = 0
+                while True:
+                    pos = ctx.find(mk_raw, pos)
+                    if pos < 0:
+                        break
+                    after = ctx[pos + mk_len:].strip()[:40].lower()
+                    if after and any(after.startswith(ds) for ds in _def_starts if len(ds) >= 15):
+                        is_def_header = True
+                        break
+                    pos += max(1, mk_len)
+                if is_def_header:
+                    continue  # Skip — this is a definition header
+                filtered.append(a)
+                deduped = filtered
+
+        # Scale both to a common line-index space.  Definitions get
+        # _p_counter * ratio, anchors get bisect_line / ratio.
+        if split is None:
+            _all_ps3 = list(soup.find_all("p"))
+            _ratio = max(1.0, len(lines) / max(1.0, len(_all_ps3)))
+            for d in definitions:
+                pidx = d.get("line_index")
+                if isinstance(pidx, (int, float)) and pidx > 0:
+                    d["line_index"] = int(pidx * _ratio)
+            _offs: List[int] = []
+            _o = 0
+            for _ln in lines:
+                _offs.append(_o)
+                _o += len(_ln) + 1
+            import bisect as _bi
+            for a in deduped:
+                ap = a.get("position")
+                if isinstance(ap, (int, float)) and ap >= 0 and _offs:
+                    li = _bi.bisect_right(_offs, int(ap)) - 1
+                    if li >= 0:
+                        a["line_index"] = int(li / _ratio)
 
         if debug_markers:
             try:
@@ -3652,6 +3859,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         source_meta,
                         definitions_by_id=global_defs_by_id,
                         id_start=next_id,
+                        forward_looking=(split is None),
                     )
                     results.extend(r)
             except Exception:
@@ -3661,6 +3869,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     source_meta,
                     definitions_by_id=global_defs_by_id,
                     id_start=next_id,
+                    forward_looking=(split is None),
                 )
         else:
             definitions_for_orphans = [dict(d) for d in definitions]
@@ -3670,6 +3879,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 source_meta,
                 definitions_by_id=global_defs_by_id,
                 id_start=next_id,
+                forward_looking=(split is None),
             )
 
         if 'definitions_for_orphans' not in locals():

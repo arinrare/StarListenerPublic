@@ -46,14 +46,14 @@ def infer_notes_continuation_harvest_start(lines: List[str]) -> Optional[int]:
     # fallback and must not treat ordinary prose like `I had ...` or `A peculiarity ...`
     # as note definitions.
     def_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*|†|‡|§)\s*(?:\]|\))?\s*[\]\)\.:\-—]\s+(.+?)\s*$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*[\]\)\.:\-—]\s+(.+?)\s*$",
         re.UNICODE,
     )
     # Marker-only lines appear in some EPUB conversions:
     #   13.
     #   Eldils: ...
     marker_only_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*|†|‡|§)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?$",
         re.UNICODE,
     )
 
@@ -533,7 +533,7 @@ def register_anchor_heuristic(name: str) -> Callable[[Callable[[AnchorHeuristicI
 # -----------------------
 @register_anchor_heuristic("reject_punctuation_asterisk")
 def _h_reject_punctuation_asterisk(inp: AnchorHeuristicInput) -> Optional[bool]:
-    if inp.marker_norm != "*":
+    if not re.fullmatch(r"\*+", inp.marker_norm):
         return None
     if _is_likely_punctuation_asterisk(inp.context):
         return False
@@ -816,7 +816,7 @@ def _ns_notes_header(inp: NotesSplitInput) -> Optional[NotesSplitResult]:
     if not lines:
         return None
     marker_only_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*|†|‡|§)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?$",
         re.UNICODE,
     )
 
@@ -1673,7 +1673,7 @@ def _is_likely_punctuation_asterisk(context: str) -> bool:
         return True
     if re.search(r"\w\*[,.;:!?]", ctx):
         return True
-    if re.search(r"[,.;:!?]\*\s", ctx):
+    if re.search(r"(?<![A-Z])[.;:!?]\*\s", ctx):
         return True
     if re.search(r"[.!?]\s*\*\s*[A-Z]", ctx):
         return True
