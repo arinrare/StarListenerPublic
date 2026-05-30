@@ -13,5 +13,6 @@ tools/
 *.epub
 *.pdf
 /tests/*.json
+/tests/*/*
 /assets/*
 backup/

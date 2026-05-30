@@ -842,6 +842,10 @@ def _build_voice_segments(
     inserted = 0
 
     for pos, fn in anchors:
+        # Respect user preferences: skip ignored markers.
+        if fn.get("user_status") == "ignored":
+            continue
+
         sentence_end = _find_sentence_end(raw_text, pos)
 
         prose = raw_text[last_pos:sentence_end + 1]
@@ -849,7 +853,8 @@ def _build_voice_segments(
             segments.append(("prose", prose))
 
         marker = fn.get("marker", "")
-        definition = fn.get("suggested_definition", "")
+        # Use manual rematch if set, otherwise engine suggestion.
+        definition = fn.get("user_definition") or fn.get("suggested_definition", "")
         if definition and str(definition).strip():
             segments.append(("footnote", f" Footnote {marker}: {definition}. End of footnote. "))
             inserted += 1

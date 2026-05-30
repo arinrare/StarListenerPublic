@@ -2843,6 +2843,25 @@ def _pair_anchors_to_definitions(
                                 confidence_score = 0.75
                                 confidence = "Medium (Forward Match)"
                                 match_method = "forward_looking"
+                            elif sorted_cands:
+                                # No definition strictly after the anchor.
+                                # Fall back to the closest definition by
+                                # absolute distance (handles ratio rounding
+                                # that puts the correct def 1-2 lines before).
+                                # When distances are equal, prefer the
+                                # definition AFTER the anchor (higher line).
+                                best, best_d, best_cl = None, None, None
+                                for c in sorted_cands:
+                                    cl = c.get("line_index", 0) or 0
+                                    d = abs(cl - int(al))
+                                    if best is None or d < best_d or (d == best_d and cl > int(al) and (best_cl is None or best_cl <= int(al))):
+                                        best, best_d = c, d
+                                        best_cl = cl
+                                if best is not None and best_d is not None and best_d <= 3:
+                                    suggested_def = best.get("text")
+                                    confidence_score = 0.65
+                                    confidence = "Medium (Nearest Forward)"
+                                    match_method = "forward_nearest"
                     if match_method == "none":
                         if occurrence_index < len(candidates) and anchor_total <= len(candidates):
                             suggested_def = candidates[occurrence_index]["text"]

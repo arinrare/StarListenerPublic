@@ -2006,6 +2006,10 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                 raw_defs.append((pi, mk2, bd2))
                     raw_defs.append((pi, marker_norm, body))
 
+                _text_def_count = len(definitions)
+
+                # Main path: 5+ raw defs → full continuation merge.
+                # This handles inline EPUBs with many definitions per chapter.
                 if len(raw_defs) >= 5:
                     # ---- Pass 2: merge continuation <p> tags.  Some EPUBs
                     #     split a definition across consecutive <p> tags;
@@ -2020,7 +2024,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             next_pi = raw_defs[di + 1][0]
 
                         # Scan forward for continuation <p> tags.
-                        for ci in range(pi + 1, min(pi + 3, len(all_ps))):
+                        for ci in range(pi + 1, min(pi + 2, len(all_ps))):
                             if next_pi is not None and ci >= next_pi:
                                 break
                             ct = _safe_text(all_ps[ci].get_text(" ") or "").strip()
@@ -2028,7 +2032,9 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                 break
                             if len(ct) > 80:
                                 break
-                            if ct[0].isupper() and len(ct) > 40:
+                            # Only block if the continuation looks like a prose
+                            # sentence: starts uppercase and has multiple words.
+                            if ct[0].isupper() and len(ct.split()) >= 2:
                                 break
                             body += " " + ct
 
@@ -2038,8 +2044,21 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             "line_index": pi + 1,
                             "origin_index": chapter_index,
                         })
+                elif raw_defs and len(lines) < 500:
+                    # Narrow path: short chapters with inline definitions.
+                    # Only activates in compact chapters where text
+                    # extraction may be poor quality.  Requires ALL raw
+                    # defs to be symbol markers (not letter false-positives).
+                    if all(_marker_category_from_raw(mk) == "symbol" for _, mk, _ in raw_defs):
+                        for pi, mk, body in raw_defs:
+                            soup_defs2.append({
+                                "marker": mk,
+                                "text": body,
+                                "line_index": pi + 1,
+                                "origin_index": chapter_index,
+                            })
 
-                if len(soup_defs2) >= 5:
+                if len(soup_defs2) > 0:
                     definitions = soup_defs2
             definitions = _filter_definitions_by_profile(definitions, allowed_categories)
 
@@ -2835,47 +2854,34 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 if not mk_raw:
                     filtered.append(a)
                     continue
-                # Check every occurrence of the marker in the context.
-                # If any occurrence's following text looks like a definition
-                # body, this anchor is a definition header — skip it.
-                is_def_header = False
+                # Find the marker occurrence closest to the context
+                # center (the anchor's actual position).  For single "*",
+                # skip occurrences preceded by another "*" (inside "**").
                 mk_len = len(mk_raw)
-                pos = 0
-                while True:
-                    pos = ctx.find(mk_raw, pos)
-                    if pos < 0:
+                mpos = len(ctx) // 2
+                search_start = max(0, mpos - 20)
+                search_end = min(len(ctx), mpos + mk_len + 20)
+                best_pos, best_dist = None, None
+                probe = search_start
+                while probe < search_end:
+                    probe = ctx.find(mk_raw, probe, search_end)
+                    if probe < 0:
                         break
-                    after = ctx[pos + mk_len:].strip()[:40].lower()
-                    if after and any(after.startswith(ds) for ds in _def_starts if len(ds) >= 15):
-                        is_def_header = True
-                        break
-                    pos += max(1, mk_len)
-                if is_def_header:
+                    if mk_raw == "*" and probe > 0 and ctx[probe - 1] == "*":
+                        probe += 1
+                        continue
+                    dist = abs(probe - mpos)
+                    if best_pos is None or dist < best_dist:
+                        best_pos, best_dist = probe, dist
+                    probe += mk_len
+                if best_pos is None:
+                    filtered.append(a)
+                    continue
+                after = ctx[best_pos + mk_len:].strip()[:40].lower()
+                if after and any(after.startswith(ds) for ds in _def_starts if len(ds) >= 15):
                     continue  # Skip — this is a definition header
                 filtered.append(a)
                 deduped = filtered
-
-        # Scale both to a common line-index space.  Definitions get
-        # _p_counter * ratio, anchors get bisect_line / ratio.
-        if split is None:
-            _all_ps3 = list(soup.find_all("p"))
-            _ratio = max(1.0, len(lines) / max(1.0, len(_all_ps3)))
-            for d in definitions:
-                pidx = d.get("line_index")
-                if isinstance(pidx, (int, float)) and pidx > 0:
-                    d["line_index"] = int(pidx * _ratio)
-            _offs: List[int] = []
-            _o = 0
-            for _ln in lines:
-                _offs.append(_o)
-                _o += len(_ln) + 1
-            import bisect as _bi
-            for a in deduped:
-                ap = a.get("position")
-                if isinstance(ap, (int, float)) and ap >= 0 and _offs:
-                    li = _bi.bisect_right(_offs, int(ap)) - 1
-                    if li >= 0:
-                        a["line_index"] = int(li / _ratio)
 
         if debug_markers:
             try:
@@ -4106,6 +4112,43 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         #  - Surface conservative orphan definitions that sit in the middle of a sequence
         results = _dedupe_numeric_results_prefer_id_link(results)
         results, next_id = _add_orphan_numeric_definitions(results, definitions_for_orphans, source_meta, next_id)
+
+        # Add orphan entries for ALL marker types so manually-selectable
+        # definitions surface in the UI even when no anchor paired with them.
+        # This enables the rematch dropdown to offer every extracted definition.
+        if definitions_for_orphans:
+            seen_defs = {
+                (r.get("chapter_group"), r.get("suggested_definition") or "")
+                for r in results
+                if r.get("suggested_definition")
+            }
+            for d in definitions_for_orphans:
+                txt = _safe_text(d.get("text") or "").strip()
+                mk = _safe_text(d.get("marker") or "").strip()
+                if not txt or not mk:
+                    continue
+                grp = str(source_meta.get("chapter_group") or "")
+                if (grp, txt) in seen_defs:
+                    continue
+                seen_defs.add((grp, txt))
+                source_meta = source_meta or {}
+                item = {
+                    "type": "footnote",
+                    "marker": mk,
+                    "context": "",
+                    "href": None,
+                    "position": 999999999,
+                    "suggested_definition": txt,
+                    "confidence": "Manual Review Required",
+                    "confidence_score": 0.55,
+                    "match_method": "orphan_definition",
+                    "id": next_id,
+                    "order_key": (source_meta.get("chapter_index") or 0) * 1_000_000_000 + 999999999,
+                }
+                item.update(source_meta)
+                item.pop("candidates", None)
+                results.append(item)
+                next_id += 1
 
         # Final recovery for inherited-label numeric-note sections: when we recovered a
         # unique local definition set for the item, promote unresolved rows that match

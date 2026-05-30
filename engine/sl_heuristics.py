@@ -535,7 +535,13 @@ def register_anchor_heuristic(name: str) -> Callable[[Callable[[AnchorHeuristicI
 def _h_reject_punctuation_asterisk(inp: AnchorHeuristicInput) -> Optional[bool]:
     if not re.fullmatch(r"\*+", inp.marker_norm):
         return None
-    if _is_likely_punctuation_asterisk(inp.context):
+    # Only check the text immediately around the anchor's position
+    # (context center), not the full ±80-char context window.  The
+    # full context may include nearby definition paragraphs whose
+    # ". * Definition" pattern falsely triggers the punctuation check.
+    mpos = len(inp.context) // 2
+    local = inp.context[max(0, mpos - 10): min(len(inp.context), mpos + 10)]
+    if _is_likely_punctuation_asterisk(local):
         return False
     return None
 
@@ -1670,8 +1676,6 @@ def _is_likely_punctuation_asterisk(context: str) -> bool:
     """Detect '*' used as punctuation/separators rather than note markers."""
     ctx = _safe_text(context)
     if not ctx:
-        return True
-    if re.search(r"\w\*[,.;:!?]", ctx):
         return True
     if re.search(r"(?<![A-Z])[.;:!?]\*\s", ctx):
         return True

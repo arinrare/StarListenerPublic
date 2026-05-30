@@ -450,15 +450,67 @@ document.addEventListener('DOMContentLoaded', async function() {
         const container = document.getElementById('footnoteContainer');
         container.innerHTML = '';
 
+        // Store references so confirm/ignore handlers can write back.
+        const _session = currentFilePath ? ensureSession(currentFilePath) : null;
+        const _matches = matches;
+        const _nmPath = _session ? getBookDataPaths(_session.outputPath).nmPath : null;
+
+        // --- Deduplication ---
+        const seenMarkers = new Set();
+        const seenDefsByChapter = {};
+        const dedupedMatches = [];
+        for (const item of matches) {
+            const mkKey = `${item.marker || ''}|${item.context || ''}|${item.position || 0}`;
+            if (seenMarkers.has(mkKey)) {
+                const existing = dedupedMatches.find(m => `${m.marker}|${m.context}|${m.position}` === mkKey);
+                if (existing && !existing.suggested_definition && item.suggested_definition) {
+                    const idx = dedupedMatches.indexOf(existing);
+                    if (idx >= 0) dedupedMatches[idx] = item;
+                }
+                continue;
+            }
+            seenMarkers.add(mkKey);
+            if (item.suggested_definition) {
+                const chKey = item.chapter_group || item.chapter_label || '';
+                if (!seenDefsByChapter[chKey]) seenDefsByChapter[chKey] = new Set();
+                const defKey = item.suggested_definition.slice(0, 100);
+                if (seenDefsByChapter[chKey].has(defKey)) {
+                    item.suggested_definition = null;
+                } else {
+                    seenDefsByChapter[chKey].add(defKey);
+                }
+            }
+            dedupedMatches.push(item);
+        }
+        matches.length = 0;
+        matches.push(...dedupedMatches);
+
+        // Build a map of available definitions for each marker type.
+        const defsByMarker = {};
+        for (const item of matches) {
+            if (!item.marker || !item.suggested_definition) continue;
+            const mk = String(item.marker);
+            if (!defsByMarker[mk]) defsByMarker[mk] = [];
+            if (!defsByMarker[mk].includes(item.suggested_definition)) {
+                defsByMarker[mk].push(item.suggested_definition);
+            }
+        }
+
         // Add a "Confirm All" button at the top
         const topConfirmBtn = document.createElement('button');
         topConfirmBtn.innerText = 'Confirm All Footnotes';
         topConfirmBtn.style.cssText = 'background: #2e7d32; color: white; padding: 12px 24px; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 20px; font-size: 1em;';
-        topConfirmBtn.addEventListener('click', function() {
+        topConfirmBtn.addEventListener('click', async function() {
+            for (const item of _matches) {
+                if (!item.user_status) item.user_status = 'confirmed';
+            }
+            if (_nmPath) {
+                await window.electronAPI.writeJsonFile(_nmPath, _matches);
+                lastScanResults = JSON.parse(JSON.stringify(_matches));
+            }
             const cards = container.querySelectorAll('.footnote-card');
             cards.forEach(card => {
                 card.style.opacity = '0.3';
-                card.style.pointerEvents = 'none';
             });
         });
         container.appendChild(topConfirmBtn);
@@ -681,16 +733,52 @@ document.addEventListener('DOMContentLoaded', async function() {
             header.innerHTML = `
                 <div class="group-header">
                     <h3>${getBestChapterLabel(items)} (${pairedCount} paired, ${reviewCount} needs review)</h3>
+                    <div style="margin-top: 6px;">
+                        <button class="chapter-confirm-btn" style="background: #2e7d32; color: white; border: none; padding: 4px 12px; border-radius: 3px; cursor: pointer; margin-right: 8px; font-size: 0.85em;">Confirm Chapter</button>
+                        <button class="chapter-ignore-btn" style="background: #777; color: white; border: none; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 0.85em;">Ignore Chapter</button>
+                    </div>
                 </div>
             `;
             container.appendChild(header);
+
+            // Wire chapter Confirm button
+            header.querySelector('.chapter-confirm-btn').addEventListener('click', async () => {
+                for (const it of items) {
+                    it.user_status = 'confirmed';
+                }
+                if (_nmPath) {
+                    await window.electronAPI.writeJsonFile(_nmPath, _matches);
+                    lastScanResults = JSON.parse(JSON.stringify(_matches));
+                }
+                const cards = header.parentElement.querySelectorAll('.footnote-card');
+                cards.forEach(c => { c.style.opacity = '0.3'; });
+            });
+
+            // Wire chapter Ignore button
+            header.querySelector('.chapter-ignore-btn').addEventListener('click', async () => {
+                for (const it of items) {
+                    it.user_status = 'ignored';
+                }
+                if (_nmPath) {
+                    await window.electronAPI.writeJsonFile(_nmPath, _matches);
+                    lastScanResults = JSON.parse(JSON.stringify(_matches));
+                }
+                const cards = header.parentElement.querySelectorAll('.footnote-card');
+                cards.forEach(c => { c.style.opacity = '0.3'; });
+            });
 
             items.forEach((item, index) => {
                 console.log(`Processing item ${index}:`, item);
                 const card = document.createElement('div');
                 card.className = 'footnote-card';
+                card.setAttribute('data-id', item.id != null ? item.id : index);
 
-                const definitionText = item.suggested_definition || "No definition found nearby";
+                if (item.user_status === 'confirmed' || item.user_status === 'ignored') {
+                    card.style.opacity = '0.3';
+                }
+
+                const effectiveDef = item.user_definition || item.suggested_definition;
+                const definitionText = effectiveDef || "No definition found nearby";
                 const renderedContext = formatMultilineText(`...${item.context || ''}...`);
                 const renderedDefinition = formatMultilineText(definitionText);
                 const score = typeof item.confidence_score === 'number' ? item.confidence_score : 0;
@@ -734,6 +822,16 @@ document.addEventListener('DOMContentLoaded', async function() {
                         <div style="flex: 1; border-left: 1px solid #444; padding-left: 15px;">
                             <span class="badge ${confidenceClass}">${badgeText}</span>
                             <p class="context-text" style="color: #64b5f6;">${renderedDefinition}</p>
+                            ${item.marker && defsByMarker[item.marker] && defsByMarker[item.marker].length > 1 ? `
+                            <div style="margin-top: 8px;">
+                                <select class="rematch-select" data-id="${item.id != null ? item.id : index}" style="width: 100%; padding: 4px; background: #333; color: #ccc; border: 1px solid #555; border-radius: 3px; font-size: 0.85em;">
+                                    <option value="">(keep current)</option>
+                                    ${defsByMarker[item.marker].map(d => {
+                                        const sel = d === effectiveDef ? ' selected' : '';
+                                        return '<option value="' + escapeHtml(d).replace(/"/g, '&quot;') + '"' + sel + '>' + escapeHtml(d.slice(0, 80)) + '</option>';
+                                    }).join('')}
+                                </select>
+                            </div>` : ''}
                         </div>
                     </div>
                     
@@ -743,6 +841,16 @@ document.addEventListener('DOMContentLoaded', async function() {
                     </div>
                 `;
                 container.appendChild(card);
+
+                // Apply button outlines for persisted state.
+                if (item.user_status === 'confirmed') {
+                    const cb = card.querySelector('.confirm-btn');
+                    if (cb) cb.style.outline = '2px solid #4caf50';
+                } else if (item.user_status === 'ignored') {
+                    const ib = card.querySelector('.ignore-btn');
+                    if (ib) ib.style.outline = '2px solid #ff9800';
+                }
+
                 console.log(`Card ${index} created`);
             });
         });
@@ -751,22 +859,81 @@ document.addEventListener('DOMContentLoaded', async function() {
 
         // Add event listeners for individual Confirm buttons
         document.querySelectorAll('.confirm-btn').forEach(btn => {
-            btn.addEventListener('click', function() {
+            btn.addEventListener('click', async function() {
                 const card = this.closest('.footnote-card');
-                if (card) {
+                if (!card) return;
+                const idAttr = card.getAttribute('data-id');
+                const id = idAttr != null ? Number(idAttr) : null;
+                const item = id != null ? _matches.find(m => m.id === id) : null;
+                if (!item) return;
+                // Toggle: if already confirmed, unconfirm; otherwise confirm.
+                if (item.user_status === 'confirmed') {
+                    delete item.user_status;
+                } else {
+                    item.user_status = 'confirmed';
+                }
+                if (_nmPath) await window.electronAPI.writeJsonFile(_nmPath, _matches);
+                lastScanResults = JSON.parse(JSON.stringify(_matches));
+                const ignoreBtn = card.querySelector('.ignore-btn');
+                if (item.user_status === 'confirmed') {
                     card.style.opacity = '0.3';
-                    card.style.pointerEvents = 'none';
+                    this.style.outline = '2px solid #4caf50';
+                    if (ignoreBtn) ignoreBtn.style.outline = 'none';
+                } else {
+                    card.style.opacity = '';
+                    this.style.outline = 'none';
                 }
             });
         });
 
         // Add event listeners for Ignore buttons
         document.querySelectorAll('.ignore-btn').forEach(btn => {
-            btn.addEventListener('click', function() {
+            btn.addEventListener('click', async function() {
+                const card = this.closest('.footnote-card');
+                if (!card) return;
+                const idAttr = card.getAttribute('data-id');
+                const id = idAttr != null ? Number(idAttr) : null;
+                const item = id != null ? _matches.find(m => m.id === id) : null;
+                if (!item) return;
+                // Toggle: if already ignored, unignore; otherwise ignore.
+                if (item.user_status === 'ignored') {
+                    delete item.user_status;
+                } else {
+                    item.user_status = 'ignored';
+                }
+                if (_nmPath) await window.electronAPI.writeJsonFile(_nmPath, _matches);
+                lastScanResults = JSON.parse(JSON.stringify(_matches));
+                const confirmBtn = card.querySelector('.confirm-btn');
+                if (item.user_status === 'ignored') {
+                    card.style.opacity = '0.3';
+                    this.style.outline = '2px solid #ff9800';
+                    if (confirmBtn) confirmBtn.style.outline = 'none';
+                } else {
+                    card.style.opacity = '';
+                    this.style.outline = 'none';
+                }
+            });
+        });
+
+        // Add event listeners for rematch dropdowns
+        document.querySelectorAll('.rematch-select').forEach(sel => {
+            sel.addEventListener('change', async function() {
+                const idAttr = this.getAttribute('data-id');
+                const id = idAttr != null ? Number(idAttr) : null;
+                const item = id != null ? _matches.find(m => m.id === id) : null;
+                if (!item) return;
+                const newDef = this.value;
+                if (newDef) { item.user_definition = newDef; }
+                else { delete item.user_definition; }
+                if (_nmPath) await window.electronAPI.writeJsonFile(_nmPath, _matches);
+                lastScanResults = JSON.parse(JSON.stringify(_matches));
                 const card = this.closest('.footnote-card');
                 if (card) {
-                    card.style.opacity = '0.3';
-                    card.style.pointerEvents = 'none';
+                    const defP = card.querySelector('p[style*="color: #64b5f6"]');
+                    if (defP) {
+                        const ed = newDef || item.suggested_definition || 'No definition found nearby';
+                        defP.innerHTML = formatMultilineText(ed);
+                    }
                 }
             });
         });
