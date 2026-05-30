@@ -62,9 +62,12 @@ def _safe_book_label(name: str) -> str:
 def _discover_books(root: Path) -> Dict[str, Path]:
     books: Dict[str, Path] = {}
     for entry in root.iterdir():
-        if not entry.is_file() or entry.suffix.lower() not in SUPPORTED_BOOK_EXTS:
-            continue
-        books[_safe_book_label(entry.name)] = entry
+        if entry.is_file() and entry.suffix.lower() in SUPPORTED_BOOK_EXTS:
+            books[_safe_book_label(entry.name)] = entry
+        elif entry.is_dir() and entry.name.lower() != "tests":
+            for sub in entry.iterdir():
+                if sub.is_file() and sub.suffix.lower() in SUPPORTED_BOOK_EXTS:
+                    books[_safe_book_label(sub.name)] = sub
     return books
 
 
