@@ -325,9 +325,13 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
                     if t.start_ts is not None and t.end_ts is not None:
                         display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
                         raw_word = display_word + (t.whitespace if t.whitespace else "")
-                        raw_word = re.sub(r'\*+', '', raw_word)
-                        if raw_word and not raw_word[-1].isspace():
-                            raw_word += ' '
+                        raw_word = re.sub(r'[\*†‡§]+', ' ', raw_word)
+                        raw_word = re.sub(r'  +', ' ', raw_word)
+                        if raw_word and raw_word[-1].isalnum():
+                            if char_pos_ref[0] < len(lower_clean):
+                                next_ch = lower_clean[char_pos_ref[0]]
+                                if next_ch.isalnum() or next_ch in '*\u2020\u2021\u00a7':
+                                    raw_word += ' '
                         para_word_ts.append({
                             "word": raw_word,
                             "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
@@ -411,9 +415,13 @@ def _generate_segmented_audio(
                         if t.start_ts is not None and t.end_ts is not None:
                             display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
                             raw_word = display_word + (t.whitespace if t.whitespace else "")
-                            raw_word = re.sub(r'\*+', '', raw_word)
-                            if raw_word and not raw_word[-1].isspace():
-                                raw_word += ' '
+                            raw_word = re.sub(r'[\*†‡§]+', ' ', raw_word)
+                            raw_word = re.sub(r'  +', ' ', raw_word)
+                            if raw_word and raw_word[-1].isalnum():
+                                if char_pos_ref[0] < len(lower_clean):
+                                    next_ch = lower_clean[char_pos_ref[0]]
+                                    if next_ch.isalnum() or next_ch in '*\u2020\u2021\u00a7':
+                                        raw_word += ' '
                             para_word_ts.append({
                                 "word": raw_word,
                                 "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
@@ -451,7 +459,7 @@ def _fill_trailing_word_gap(para_text: str, para_word_ts: list, para_end_ms: flo
         return para_word_ts
 
     covered = ''.join(w["word"] for w in para_word_ts).rstrip()
-    para_norm = re.sub(r'\*+', '', para_text).strip()
+    para_norm = re.sub(r'[\*†‡§]+', '', para_text).strip()
 
     if para_norm.startswith(covered):
         remaining = para_norm[len(covered):].strip()
