@@ -325,13 +325,17 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
                     if t.start_ts is not None and t.end_ts is not None:
                         display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
                         raw_word = display_word + (t.whitespace if t.whitespace else "")
-                        raw_word = re.sub(r'[\*†‡§]+', ' ', raw_word)
-                        raw_word = re.sub(r'  +', ' ', raw_word)
+                        had_marker = bool(re.search(r'[\*†‡§]', raw_word))
+                        raw_word = re.sub(r'[\*†‡§]+', '', raw_word)
+                        scan = char_pos_ref[0]
+                        while scan < len(lower_clean) and lower_clean[scan] in '*\u2020\u2021\u00a7 \t':
+                            scan += 1
+                        next_is_word = scan < len(lower_clean) and lower_clean[scan].isalnum()
                         if raw_word and raw_word[-1].isalnum():
-                            if char_pos_ref[0] < len(lower_clean):
-                                next_ch = lower_clean[char_pos_ref[0]]
-                                if next_ch.isalnum() or next_ch in '*\u2020\u2021\u00a7':
-                                    raw_word += ' '
+                            if next_is_word:
+                                raw_word += ' '
+                        elif had_marker and raw_word and raw_word[-1].isspace() and not next_is_word:
+                            raw_word = raw_word.rstrip()
                         para_word_ts.append({
                             "word": raw_word,
                             "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
@@ -415,13 +419,17 @@ def _generate_segmented_audio(
                         if t.start_ts is not None and t.end_ts is not None:
                             display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
                             raw_word = display_word + (t.whitespace if t.whitespace else "")
-                            raw_word = re.sub(r'[\*†‡§]+', ' ', raw_word)
-                            raw_word = re.sub(r'  +', ' ', raw_word)
+                            had_marker = bool(re.search(r'[\*†‡§]', raw_word))
+                            raw_word = re.sub(r'[\*†‡§]+', '', raw_word)
+                            scan = char_pos_ref[0]
+                            while scan < len(lower_clean) and lower_clean[scan] in '*\u2020\u2021\u00a7 \t':
+                                scan += 1
+                            next_is_word = scan < len(lower_clean) and lower_clean[scan].isalnum()
                             if raw_word and raw_word[-1].isalnum():
-                                if char_pos_ref[0] < len(lower_clean):
-                                    next_ch = lower_clean[char_pos_ref[0]]
-                                    if next_ch.isalnum() or next_ch in '*\u2020\u2021\u00a7':
-                                        raw_word += ' '
+                                if next_is_word:
+                                    raw_word += ' '
+                            elif had_marker and raw_word and raw_word[-1].isspace() and not next_is_word:
+                                raw_word = raw_word.rstrip()
                             para_word_ts.append({
                                 "word": raw_word,
                                 "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
