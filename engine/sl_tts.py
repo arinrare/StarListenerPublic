@@ -324,8 +324,12 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
                 for t in result.tokens:
                     if t.start_ts is not None and t.end_ts is not None:
                         display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
+                        raw_word = display_word + (t.whitespace if t.whitespace else "")
+                        raw_word = re.sub(r'\*+', '', raw_word)
+                        if raw_word and not raw_word[-1].isspace():
+                            raw_word += ' '
                         para_word_ts.append({
-                            "word": display_word + (t.whitespace if t.whitespace else ""),
+                            "word": raw_word,
                             "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
                             "end_ms": round(t.end_ts * 1000 + sub_offset_ms),
                         })
@@ -343,6 +347,7 @@ def _generate_tts_from_paragraphs(text: str, lang: str, voice: str, speed: float
             for wt in para_word_ts:
                 wt["start_ms"] = round(wt["start_ms"] + para_start_ms)
                 wt["end_ms"] = round(wt["end_ms"] + para_start_ms)
+            para_word_ts = _fill_trailing_word_gap(para, para_word_ts, round(para_end_ms))
         ts_handle.write(json.dumps({"w": para_word_ts, "p": para_entry}, ensure_ascii=False) + "\n")
         ts_handle.flush()
         cum_ms = para_end_ms
@@ -405,8 +410,12 @@ def _generate_segmented_audio(
                     for t in result.tokens:
                         if t.start_ts is not None and t.end_ts is not None:
                             display_word = _resolve_display_word(t.text, lower_clean, orig_clean, char_pos_ref)
+                            raw_word = display_word + (t.whitespace if t.whitespace else "")
+                            raw_word = re.sub(r'\*+', '', raw_word)
+                            if raw_word and not raw_word[-1].isspace():
+                                raw_word += ' '
                             para_word_ts.append({
-                                "word": display_word + (t.whitespace if t.whitespace else ""),
+                                "word": raw_word,
                                 "start_ms": round(t.start_ts * 1000 + sub_offset_ms),
                                 "end_ms": round(t.end_ts * 1000 + sub_offset_ms),
                             })
@@ -424,11 +433,46 @@ def _generate_segmented_audio(
                 for wt in para_word_ts:
                     wt["start_ms"] = round(wt["start_ms"] + para_start_ms)
                     wt["end_ms"] = round(wt["end_ms"] + para_start_ms)
+                para_word_ts = _fill_trailing_word_gap(para, para_word_ts, round(para_end_ms))
             ts_handle.write(json.dumps({"w": para_word_ts, "p": para_entry}, ensure_ascii=False) + "\n")
             ts_handle.flush()
             cum_ms = para_end_ms
 
     return total_samples, sr
+
+
+def _fill_trailing_word_gap(para_text: str, para_word_ts: list, para_end_ms: float) -> list:
+    if not para_word_ts:
+        return para_word_ts
+
+    last_ts = para_word_ts[-1]
+    gap_ms = para_end_ms - last_ts["end_ms"]
+    if gap_ms <= 300:
+        return para_word_ts
+
+    covered = ''.join(w["word"] for w in para_word_ts).rstrip()
+    para_norm = re.sub(r'\*+', '', para_text).strip()
+
+    if para_norm.startswith(covered):
+        remaining = para_norm[len(covered):].strip()
+    else:
+        last_word_text = last_ts["word"].strip()
+        pos = para_norm.rfind(last_word_text)
+        if pos >= 0:
+            remaining = para_norm[pos + len(last_word_text):].strip()
+        else:
+            return para_word_ts
+
+    if not remaining:
+        return para_word_ts
+
+    para_word_ts.append({
+        "word": remaining + ' ',
+        "start_ms": last_ts["end_ms"],
+        "end_ms": round(para_end_ms),
+    })
+    return para_word_ts
+
 
 
 def _chunk_text(full_text: str) -> list:
@@ -793,10 +837,37 @@ def _find_anchor_by_context(raw_text: str, fn: dict) -> Optional[int]:
     return None
 
 
+_SENTENCE_END_RE = re.compile(r"[.!?](?:\s|\n|$)")
+_ABBREV_RE = re.compile(
+    r'(?:'
+    r'(?:[A-Z]\.)+(?:[A-Z]\.?)?$'  # multi-initial: U.S., N.C.O., R.F.C., Capt.
+    r'|\b(?:No|Mr|Mrs|Ms|Dr|Prof|Capt|Col|Maj|Gen|Lt|Sgt|Cpl|Pvt|St|Mt|dept|govt|approx|esp|inc|Jr|Sr)$'
+    r'|\b(?:e\.g|i\.e|etc|vs|viz)$'
+    r')',
+    re.IGNORECASE,
+)
+
+
+def _is_abbreviation(text_before_period: str) -> bool:
+    stripped = text_before_period.rstrip()
+    if not stripped:
+        return False
+    if len(stripped) >= 2 and stripped[-2:] == '..':
+        return False
+    if _ABBREV_RE.search(stripped):
+        return True
+    before_stripped = stripped.rstrip('.')
+    if before_stripped != stripped and _ABBREV_RE.search(before_stripped):
+        return True
+    return False
+
+
 def _find_sentence_end(text: str, pos: int) -> int:
-    m = re.search(r"[.!?](?:\s|\n|$)", text[pos:])
-    if m:
-        return pos + m.start()
+    for m in _SENTENCE_END_RE.finditer(text[pos:]):
+        end_pos = pos + m.start()
+        if text[end_pos] == '.' and _is_abbreviation(text[max(0, end_pos - 10):end_pos]):
+            continue
+        return end_pos
     nl = text.find("\n", pos)
     if nl >= 0:
         return nl
