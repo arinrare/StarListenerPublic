@@ -16,3 +16,5 @@ tools/
 /tests/*/*
 /assets/*
 backup/
+opencode*.*
+*PLAN*.*
