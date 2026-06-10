@@ -1075,7 +1075,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 probe_soup2 = BeautifulSoup(html_text2, "html.parser")
                 item_sup_count = 0
                 for sup in probe_soup2.find_all("sup"):
-                    if sup.find("a") is not None:
+                    if sup.find_parent("a") is not None:
                         continue
                     txt = _safe_text(sup.get_text(" ")).strip()
                     if re.fullmatch(r"\d{1,3}", txt):
@@ -1990,7 +1990,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
             # Used when text-based extraction fails, OR when the book uses raw
             # <sup> markers that fool infer_notes_split (detected in Pass 1).
             soup_defs2: List[Dict[str, Any]] = []
-            if (split is None and not text_definitions) or sup_based_book:
+            if (split is None and not text_definitions) or sup_based_book or (structured_footnote_epub and not structured_note_defs):
                 def_re2 = _def_line_regex()
                 _inline_next_marker_re = re.compile(
                     r"(?:\s+|^)(\*+|†+|‡+|§+)\s+",
@@ -2088,10 +2088,11 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                 "origin_index": chapter_index,
                             })
 
-            # When sup-based book: prefer soup definitions, merging in text
-            # definitions for markers not covered by soup (handles mixed
-            # marker types like * + sup in the same book).
-            if sup_based_book and soup_defs2:
+            # When sup-based or structured-fallback: prefer soup definitions,
+            # merging in text definitions for markers not covered by soup
+            # (handles mixed marker types like * + sup in the same book).
+            structured_fallback = structured_footnote_epub and not structured_note_defs
+            if (sup_based_book or structured_fallback) and soup_defs2:
                 soup_markers = {d["marker"] for d in soup_defs2}
                 definitions = list(soup_defs2)
                 for d in text_definitions:
@@ -2171,13 +2172,24 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             return True
                         if re.match(r"^\s*[IVXLC]{1,12}\s*\.?\s*$", t):
                             return True
+                        # Roman numeral + dot + text (e.g. "VI. THE Palantír.")
+                        # Title-case validation can fail on accented characters,
+                        # so just require the basic pattern.
+                        if re.match(r"^\s*[IVXLC]{1,12}\s*\.\s+\S", t):
+                            return True
                         if _def_line_looks_like_combined_chapter_heading(t):
                             return True
                         if "BOOK" in u and len(u) <= 18:
                             return True
                     return False
 
-                first_def_idx = extra_defs[0].get("line_index") if extra_defs else None
+                # If the next spine item starts with a chapter heading, it's a
+                # new chapter — don't spill definitions backwards into this one.
+                if _prefix_looks_like_new_chapter(next_lines[: min(30, len(next_lines))]):
+                    extra_defs = []
+                    first_def_idx = None
+                else:
+                    first_def_idx = extra_defs[0].get("line_index") if extra_defs else None
 
                 try:
                     if isinstance(first_def_idx, int) and 0 <= first_def_idx < len(next_lines):
@@ -4169,6 +4181,15 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 mk = _safe_text(d.get("marker") or "").strip()
                 if not txt or not mk:
                     continue
+                # Skip definitions that belong to a different chapter.
+                # This prevents cross-chapter leakage of orphan definitions
+                # from global harvesting or spillover (e.g. Chapter VI notes
+                # appearing in Chapter V output).
+                d_group = d.get("chapter_group")
+                if d_group is not None:
+                    cur_group = source_meta.get("chapter_group")
+                    if cur_group is not None and str(d_group) != str(cur_group):
+                        continue
                 grp = str(source_meta.get("chapter_group") or "")
                 if (grp, txt) in seen_defs:
                     continue
@@ -4633,6 +4654,32 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         except Exception:
             pass
 
+        # Drop recovered_anchor rows that duplicate a stronger match (id_link,
+        # marker_unique, etc.) for the same (chapter_group, marker).  Do NOT
+        # drop them when only an orphan_definition exists — recovered_anchor
+        # is an upgrade of orphan (it carries context and position).
+        try:
+            if results:
+                stronger_keys: set[Tuple[Optional[str], str]] = set()
+                for r in results:
+                    if r.get("match_method") in ("orphan_definition", "recovered_anchor"):
+                        continue
+                    mk = str(r.get("marker") or "").strip()
+                    if not mk:
+                        continue
+                    g = r.get("chapter_group")
+                    gkey = str(g) if g is not None else None
+                    stronger_keys.add((gkey, mk))
+
+                if stronger_keys:
+                    results = [r for r in results
+                               if r.get("match_method") != "recovered_anchor"
+                               or (str(r.get("chapter_group") or ""),
+                                   str(r.get("marker") or "").strip())
+                               not in stronger_keys]
+        except Exception:
+            pass
+
         if (
             not results
             and definitions
@@ -4784,6 +4831,18 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             new_label = f"{cur} \u00b7 {block_boundaries[-1][2]}"
                             r["chapter_label"] = new_label
                             r["chapter_group"] = _chapter_group_key(new_label)
+
+        # When structured convention produced definitions for this chapter,
+        # keep only id_link and orphan_definition rows (drop heuristic matches).
+        # When structured convention failed (e.g. bkch-style IDs not recognized),
+        # tag results so the global filter won't drop them.
+        if structured_footnote_epub:
+            if structured_note_defs:
+                results = [r for r in results
+                           if r.get("match_method") in ("id_link", "orphan_definition")]
+            else:
+                for r in results:
+                    r["_structured_fallback"] = True
 
         all_results.extend(results)
 
@@ -5017,18 +5076,25 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
     except Exception:
         pass
 
-    # When a structured footnote convention is active, the EPUB's footnote structure
-    # is explicit in the HTML DOM. Only id_link results (from explicit href/fragment
-    # pairs) are real footnotes. Drop all heuristic matches to prevent AI disambiguation.
+    # When a structured footnote convention is active, the EPUB's footnote
+    # structure is explicit in the HTML DOM.  Keep only id_link results (from
+    # explicit href/fragment pairs) and orphan_definition results.  Rows tagged
+    # _structured_fallback come from chapters where the convention produced
+    # no definitions (e.g. bkch-style IDs not recognized) and must survive.
     if structured_footnote_epub:
         filtered_results: list[dict] = []
         for r in all_results:
-            if not isinstance(r, dict):
+            if r.get("_structured_fallback"):
+                filtered_results.append(r)
                 continue
             method = r.get("match_method")
             if method in ("id_link", "orphan_definition"):
                 filtered_results.append(r)
         all_results = filtered_results
+
+    # Strip internal flag before serialization.
+    for r in all_results:
+        r.pop("_structured_fallback", None)
 
     _repair_structural_parent_note_swaps(all_results)
     _apply_marker_family_outlier_penalty(all_results)
