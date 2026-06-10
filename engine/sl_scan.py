@@ -1060,6 +1060,38 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         os.environ["STARLISTENER_AI_DISABLED"] = "1"
         _ai_was_disabled = True
 
+    # Detect books that use raw <sup> tags (without <a> links) as their primary
+    # footnote marker convention.  BeautifulSoup's get_text("\n") splits <sup>
+    # onto separate lines, fooling infer_notes_split and text-based extraction.
+    # For these books we prefer soup-level <p>-paragraph detection in Pass 2.
+    sup_based_book = False
+    try:
+        total_sup_markers = 0
+        sup_marker_files: set[int] = set()
+        for idx2, it2 in enumerate(items):
+            try:
+                html_content2 = it2.get_content()
+                html_text2 = html_content2.decode("utf-8", errors="ignore") if isinstance(html_content2, bytes) else str(html_content2)
+                probe_soup2 = BeautifulSoup(html_text2, "html.parser")
+                item_sup_count = 0
+                for sup in probe_soup2.find_all("sup"):
+                    if sup.find("a") is not None:
+                        continue
+                    txt = _safe_text(sup.get_text(" ")).strip()
+                    if re.fullmatch(r"\d{1,3}", txt):
+                        item_sup_count += 1
+                if item_sup_count >= 2:
+                    sup_marker_files.add(int(idx2))
+                    total_sup_markers += item_sup_count
+            except Exception:
+                continue
+        sup_based_book = (
+            total_sup_markers >= 10
+            and len(sup_marker_files) >= 3
+        )
+    except Exception:
+        sup_based_book = False
+
     # Parse the TOC for chapter structure. A high-quality TOC provides chapter labels
     # and boundaries that are more reliable than text-based heuristics.
     toc_file_to_label, toc_file_entries, toc_is_high_quality = _parse_toc_chapter_map()
@@ -1952,15 +1984,13 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     definitions.append(d)
             definitions = _filter_definitions_by_profile(definitions, allowed_categories)
         else:
-            definitions = _extract_definitions_from_lines(lines, defs_start)
+            text_definitions = _extract_definitions_from_lines(lines, defs_start)
 
-            # When the primary notes-split heuristic found no notes section
-            # at all (split is None), the text-based extraction produces
-            # poor results for inline-definition EPUBs where definitions are
-            # scattered throughout the prose.  Use soup-level paragraph
-            # detection instead: a paragraph whose text starts with a symbol
-            # marker is a definition paragraph.
-            if split is None:
+            # Soup-level paragraph detection: extracts definitions from <p> tags.
+            # Used when text-based extraction fails, OR when the book uses raw
+            # <sup> markers that fool infer_notes_split (detected in Pass 1).
+            soup_defs2: List[Dict[str, Any]] = []
+            if (split is None and not text_definitions) or sup_based_book:
                 def_re2 = _def_line_regex()
                 _inline_next_marker_re = re.compile(
                     r"(?:\s+|^)(\*+|†+|‡+|§+)\s+",
@@ -1987,10 +2017,6 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     if not m_start:
                         continue
                     marker_norm = _normalize_marker(m_start.group(1))
-                    if re.fullmatch(r"[A-Za-z]", marker_norm):
-                        cat = _marker_category_from_raw(m_start.group(1))
-                        if cat not in {"let_paren", "let_bracket"}:
-                            continue
                     body = _safe_text(m_start.group(2) or "").strip()
 
                     # Handle inline secondary definition inside same <p>.
@@ -2006,11 +2032,12 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                 raw_defs.append((pi, mk2, bd2))
                     raw_defs.append((pi, marker_norm, body))
 
-                _text_def_count = len(definitions)
-
                 # Main path: 5+ raw defs → full continuation merge.
                 # This handles inline EPUBs with many definitions per chapter.
                 if len(raw_defs) >= 5:
+                    # Only include symbol and numeric markers (not letter markers which
+                    # are often false positives from running text).
+                    raw_defs = [(pi, mk, body) for pi, mk, body in raw_defs if _marker_category_from_raw(mk) in {"symbol", "num_plain", "num_paren", "num_bracket"}]
                     # ---- Pass 2: merge continuation <p> tags.  Some EPUBs
                     #     split a definition across consecutive <p> tags;
                     #     the first carries the marker, the rest is plain
@@ -2047,10 +2074,13 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 elif raw_defs and len(lines) < 500:
                     # Narrow path: short chapters with inline definitions.
                     # Only activates in compact chapters where text
-                    # extraction may be poor quality.  Requires ALL raw
-                    # defs to be symbol markers (not letter false-positives).
-                    if all(_marker_category_from_raw(mk) == "symbol" for _, mk, _ in raw_defs):
-                        for pi, mk, body in raw_defs:
+                    # extraction may be poor quality.  Exclude letter
+                    # false-positives (like "A" at start of prose paragraphs)
+                    # before processing, mirroring the main-path filter.
+                    filtered = [(pi, mk, body) for pi, mk, body in raw_defs
+                                if _marker_category_from_raw(mk) in {"symbol", "num_plain", "num_paren", "num_bracket"}]
+                    if filtered:
+                        for pi, mk, body in filtered:
                             soup_defs2.append({
                                 "marker": mk,
                                 "text": body,
@@ -2058,8 +2088,20 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                 "origin_index": chapter_index,
                             })
 
-                if len(soup_defs2) > 0:
-                    definitions = soup_defs2
+            # When sup-based book: prefer soup definitions, merging in text
+            # definitions for markers not covered by soup (handles mixed
+            # marker types like * + sup in the same book).
+            if sup_based_book and soup_defs2:
+                soup_markers = {d["marker"] for d in soup_defs2}
+                definitions = list(soup_defs2)
+                for d in text_definitions:
+                    if d["marker"] not in soup_markers:
+                        definitions.append(d)
+            elif not text_definitions and soup_defs2:
+                definitions = soup_defs2
+            else:
+                definitions = text_definitions
+            
             definitions = _filter_definitions_by_profile(definitions, allowed_categories)
 
         # Build a set of definition body prefixes for the definition-header
