@@ -576,6 +576,33 @@ def _remove_notes_block(text: str) -> str:
                 break
             result.extend(lines[j:])
             return "\n".join(result).strip()
+
+    def_re = _def_line_regex()
+    _DEF_COLON_RE = re.compile(r"^\s*:\s+.+")
+    _BARE_DIGIT_RE = re.compile(r"^\s*\d{1,3}\s*$")
+
+    last_non_def = len(lines)
+    def_count = 0
+    had_marker = False
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].rstrip("\r")
+        if not stripped.strip():
+            if def_count > 0:
+                continue
+            last_non_def = i
+            continue
+        if def_re.match(stripped) or _DEF_COLON_RE.match(stripped):
+            def_count += 1
+            continue
+        if _BARE_DIGIT_RE.match(stripped):
+            had_marker = True
+            continue
+        last_non_def = i + 1
+        break
+
+    if def_count >= 3 or (def_count >= 1 and had_marker):
+        return "\n".join(lines[:last_non_def]).strip()
+
     return text
 
 
