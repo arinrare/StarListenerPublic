@@ -31,12 +31,12 @@ from engine.sl_types import ScanOptions
 
 SUPPORTED_BOOK_EXTS = {".epub", ".pdf", ".txt", ".md", ".html", ".htm", ".xhtml"}
 GOLDEN_NAME_RE = re.compile(r"^(?P<label>.+)_\d{8}_\d{6}\.json$", re.IGNORECASE)
+# Fields whose values are internal implementation details and do not affect
+# user-visible output.  Everything else is compared: markers, definitions,
+# chapter labels, context, confidence, match methods, etc.
 IGNORED_ROW_KEYS = {
     "id",
-    "confidence",
-    "confidence_score",
     "confidence_score_base",
-    "match_method",
     "chapter_index",
     "chapter_name",
     "chapter_group",
@@ -197,32 +197,48 @@ def _group_by_chapter(rows: Iterable[Dict[str, Any]]) -> Dict[str, List[Dict[str
 def _format_row(row: Dict[str, Any]) -> str:
     marker = row.get("marker")
     label = row.get("chapter_label")
-    name = row.get("chapter_name")
     method = row.get("match_method")
     position = row.get("position")
-    return f"marker={marker!r} label={label!r} chapter_name={name!r} match={method!r} position={position!r}"
+    return f"marker={marker!r} chapter={label!r} match={method!r} position={position!r}"
 
 
-def _diff_chapter(expected_rows: Sequence[Dict[str, Any]], actual_rows: Sequence[Dict[str, Any]]) -> Optional[str]:
-    exp = [_canonical_row(row) for row in expected_rows]
-    act = [_canonical_row(row) for row in actual_rows]
+def _diff_chapter(expected_rows: Sequence[Dict[str, Any]], actual_rows: Sequence[Dict[str, Any]]) -> List[str]:
+    exp_canon = [_canonical_row(row) for row in expected_rows]
+    act_canon = [_canonical_row(row) for row in actual_rows]
+    differences: List[str] = []
 
-    if len(exp) != len(act):
-        return f"row count mismatch: expected {len(exp)}, got {len(act)}"
+    if len(exp_canon) != len(act_canon):
+        differences.append(f"row count mismatch: expected {len(exp_canon)}, got {len(act_canon)}")
+        return differences
 
-    for idx, (left, right) in enumerate(zip(exp, act)):
-        if left == right:
+    for idx in range(len(exp_canon)):
+        left_canon = exp_canon[idx]
+        right_canon = act_canon[idx]
+        if left_canon == right_canon:
             continue
 
-        differing = [key for key in sorted(set(left) | set(right)) if left.get(key) != right.get(key)]
-        preview = ", ".join(differing[:8])
-        return (
-            f"first row mismatch at offset {idx}: differing keys [{preview}]\n"
-            f"  expected {_format_row(left)}\n"
-            f"  actual   {_format_row(right)}"
-        )
+        left_raw = expected_rows[idx]
+        right_raw = actual_rows[idx]
 
-    return None
+        differing = [
+            key for key in sorted(set(left_canon) | set(right_canon))
+            if left_canon.get(key) != right_canon.get(key)
+        ]
+
+        lines: List[str] = [_format_row(left_raw)]
+        for key in differing:
+            exp_val = repr(left_canon.get(key))
+            act_val = repr(right_canon.get(key))
+            if len(exp_val) > 140:
+                exp_val = exp_val[:137] + "..."
+            if len(act_val) > 140:
+                act_val = act_val[:137] + "..."
+            lines.append(f"    {key}: expected={exp_val}")
+            lines.append(f"    {key}: got      {act_val}")
+
+        differences.append(f"  offset {idx}:\n" + "\n".join(lines))
+
+    return differences
 
 
 def compare_against_golden(golden_path: Path, book_path: Path) -> List[str]:
@@ -248,11 +264,11 @@ def compare_against_golden(golden_path: Path, book_path: Path) -> List[str]:
         failures.append(f"new chapter displays detected: {extra_labels}")
 
     for chapter_key in sorted(expected_chapters & actual_chapters):
-        diff = _diff_chapter(expected_grouped[chapter_key], actual_grouped[chapter_key])
-        if diff is not None:
+        chapter_diffs = _diff_chapter(expected_grouped[chapter_key], actual_grouped[chapter_key])
+        if chapter_diffs:
             label = _display_group_label(expected_grouped[chapter_key])
-            failures.append(f"chapter_display {label!r}: {diff}")
-            break
+            failures.append(f"chapter_display {label!r}:")
+            failures.extend(chapter_diffs)
 
     return failures
 

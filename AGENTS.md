@@ -2,7 +2,8 @@
 
 ## Build & Test
 - `npm start` — launch the Electron app.
-- There is no test suite yet. All verification is manual.
+- There is a regression suite test in /tests. Never change how this test works, it is deigned to test publications
+  against a manually checked golden JSON file. If the golden is different to the current scan, we must know EVERY user visible difference. 
 
 ## Python Engine
 - The engine lives in `engine/`. It is invoked from Node via `spawn`.
