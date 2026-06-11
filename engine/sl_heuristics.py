@@ -53,7 +53,7 @@ def infer_notes_continuation_harvest_start(lines: List[str]) -> Optional[int]:
     #   13.
     #   Eldils: ...
     marker_only_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*[\]\)\.:\-—]\s*$",
         re.UNICODE,
     )
 
