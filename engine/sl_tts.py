@@ -600,7 +600,7 @@ def _remove_notes_block(text: str) -> str:
         last_non_def = i + 1
         break
 
-    if def_count >= 3 or (def_count >= 1 and had_marker):
+    if def_count >= 2 or (def_count >= 1 and had_marker):
         return "\n".join(lines[:last_non_def]).strip()
 
     return text
@@ -978,6 +978,31 @@ def _build_voice_segments(
         last_pos = sentence_end + 1
 
     remaining = _remove_notes_block(raw_text[last_pos:])
+    if remaining == raw_text[last_pos:]:
+        # _remove_notes_block returned the tail unchanged (no notes block
+        # detected by header or definition-cluster heuristics).  Search for
+        # the known definition texts and truncate from the earliest match.
+        _bare_digit_line_re = re.compile(r"^\s*\d{1,3}\s*$")
+        cut_pos = len(remaining)
+        for fn in footnotes:
+            def_text = fn.get("suggested_definition", "")
+            if def_text and _safe_text(def_text):
+                idx = remaining.find(_safe_text(def_text))
+                if 0 <= idx < cut_pos:
+                    # Cut at the start of the line containing the body.
+                    line_start = remaining.rfind("\n", 0, idx)
+                    line_start = line_start + 1 if line_start >= 0 else 0
+                    # Also scan back for a preceding bare-digit marker line
+                    # (e.g. "2" on its own line), since the definition
+                    # format may split the marker and body across lines.
+                    prev = remaining[:line_start].rstrip("\n")
+                    prev_line_start = prev.rfind("\n")
+                    prev_line = prev[prev_line_start + 1:] if prev_line_start >= 0 else prev
+                    if _bare_digit_line_re.match(prev_line):
+                        line_start = prev_line_start + 1 if prev_line_start >= 0 else 0
+                    cut_pos = line_start
+        if cut_pos < len(remaining):
+            remaining = remaining[:cut_pos].rstrip()
     if remaining.strip():
         segments.append(("prose", remaining))
 
