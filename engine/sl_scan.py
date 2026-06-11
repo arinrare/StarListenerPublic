@@ -1851,7 +1851,9 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     tail_def_like = [
                         i
                         for i in range(tail_start, len(lines))
-                        if _def_line_regex().match(lines[i] or "")
+                        if (m := _def_line_regex().match(lines[i] or ""))
+                        and _safe_text(m.group(2) or "").strip()
+                        and len(_safe_text(m.group(2) or "").strip()) >= 12
                         and not _def_line_looks_like_combined_chapter_heading(lines[i] or "")
                     ]
                     if len(tail_def_like) >= 2:
