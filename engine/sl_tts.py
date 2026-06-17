@@ -597,6 +597,9 @@ def _remove_notes_block(text: str) -> str:
         if _BARE_DIGIT_RE.match(stripped):
             had_marker = True
             continue
+        if had_marker and stripped.startswith((" ", "\t")):
+            def_count += 1
+            continue
         last_non_def = i + 1
         break
 
