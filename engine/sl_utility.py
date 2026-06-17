@@ -181,4 +181,6 @@ def _marker_category_from_raw(raw: str) -> str:
         return "symbol"
     if re.fullmatch(r"\d{1,3}", r):
         return "num_plain"
+    if re.fullmatch(r"[a-zA-Z]{1,4}\d{1,3}[a-z]?$", r):
+        return "num_plain"
     return "other"

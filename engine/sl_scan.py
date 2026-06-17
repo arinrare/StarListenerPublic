@@ -1025,7 +1025,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                 _st_rst_convention = True
 
                 # Count footnote-class definition elements with IDs.
-                for p in probe_soup.select(".footnote, .footnotet, .noindent-x1"):
+                for p in probe_soup.select(".footnote, .footnotes, .footnotet, .noindent-x1"):
                     pid = _safe_text(p.get("id") or "").strip()
                     if pid and pid in referenced_def_ids:
                         total_bidi_defs += 1
@@ -1799,7 +1799,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         # but no prose anchor links (small-marker <a> tags with href fragments),
         # it's a pure footnote-definition page -- skip it (defs already harvested in Pass 1).
         if structured_footnote_epub:
-            has_footnote_defs = bool(soup.select(".footnote, .footnotet, .noindent-x1"))
+            has_footnote_defs = bool(soup.select(".footnote, .footnotes, .footnotet, .noindent-x1"))
             _small_marker_skip_re = re.compile(r"^\s*(?:\d{1,3}|\*+|\u2020+|\u2021+|\u00a7+|[a-zA-Z])\s*$", re.UNICODE)
             has_prose_anchors = any(
                 _small_marker_skip_re.match(_safe_text(a.get_text(" ")).strip())

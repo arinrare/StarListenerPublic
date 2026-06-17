@@ -425,7 +425,7 @@ def _assign_positions_to_soup_anchors(anchors: List[Dict[str, Any]], lines: List
                 # We mirror the extraction constraints to avoid grabbing arbitrary
                 # superscripts or definition-leading markers.
                 if sup_anchors:
-                    sup_allowed_re = re.compile(r"^(?:\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z])$")
+                    sup_allowed_re = re.compile(r"^(?:\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3})$")
 
                     def _sup_is_definition_marker(sup_tag, marker_norm: str) -> bool:
                         try:
@@ -870,13 +870,13 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
             marker_txt = m.group(1) if m else ""
 
         # Normalize common variants like "(10)" or "10.".
-        if marker_txt and not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]", marker_txt):
+        if marker_txt and not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3}", marker_txt):
             m = re.fullmatch(r"\s*[\(\[]?\s*(\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z])\s*[\)\]]?\s*\.?\s*", marker_txt)
             if m:
                 marker_txt = m.group(1)
 
         # Only accept small marker-like texts.
-        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]", marker_txt or ""):
+        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3}", marker_txt or ""):
             continue
 
         marker_norm = _normalize_marker(marker_txt)
@@ -960,7 +960,7 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         if not txt:
             continue
         # Keep only small digit markers or known symbols.
-        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]", txt):
+        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3}", txt):
             continue
         marker_norm = _normalize_marker(txt)
         if not marker_norm:
@@ -976,6 +976,12 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
             dm = _def_line_regex().match(container_text)
             if dm and _normalize_marker(dm.group(1)) == marker_norm:
                 continue
+            # Also skip superscripts whose container has a note-like class
+            # — these are back-links within definition paragraphs, not prose anchors.
+            if container is not None:
+                c_cls = " ".join(container.get("class") or []).lower()
+                if any(tok in c_cls for tok in ("note", "endnote", "footnote")):
+                    continue
         except Exception:
             pass
 
@@ -1032,7 +1038,7 @@ def _harvest_specific_filepos_note_targets(soup: BeautifulSoup) -> Tuple[Dict[st
         if not a:
             continue
         mk_raw = _safe_text(a.get_text(" "))
-        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]", mk_raw or ""):
+        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3}", mk_raw or ""):
             continue
 
         # Get full paragraph text and strip the marker prefix.
@@ -1088,7 +1094,7 @@ def _harvest_structured_notes_section_targets(soup: BeautifulSoup) -> Tuple[Dict
     if soup is None:
         return id_map, marker_defs
 
-    marker_text_re = re.compile(r"\d{1,3}|\*+|[A-Za-z]", re.UNICODE)
+    marker_text_re = re.compile(r"\d{1,3}|\*+|[A-Za-z]|[A-Za-z]{1,4}\d{1,3}", re.UNICODE)
     boundary_tag_names = {"h1", "h2", "h3", "h4", "h5", "h6", "title"}
     scanned_ids: set[int] = set()
 
@@ -1119,6 +1125,22 @@ def _harvest_structured_notes_section_targets(soup: BeautifulSoup) -> Tuple[Dict
                 break
         except Exception:
             first_anchor = None
+
+        if first_anchor is None:
+            tag_cls_str = " ".join(getattr(tag, "get", lambda _: [])("class") or []).lower()
+            if "footnote" not in tag_cls_str and "footnotet" not in tag_cls_str and "noindent-x1" not in tag_cls_str:
+                return None
+            try:
+                for a in tag.find_all("a"):
+                    try:
+                        if a.find_parent("sup") is None:
+                            continue
+                    except Exception:
+                        pass
+                    first_anchor = a
+                    break
+            except Exception:
+                first_anchor = None
 
         if first_anchor is None:
             return None
@@ -1194,7 +1216,7 @@ def _harvest_structured_notes_section_targets(soup: BeautifulSoup) -> Tuple[Dict
     # CSS classes for definition blocks (common in calibre-produced scholarly editions).
     # This handles books where each footnote definition is in its own <p> element with
     # an explicit footnote class, even when _rfn ids are absent.
-    footnote_class_elts = soup.select(".footnote, .footnotet, .noindent-x1")
+    footnote_class_elts = soup.select(".footnote, .footnotes, .footnotet, .noindent-x1")
     if footnote_class_elts:
         for elt in footnote_class_elts:
             note_entry = _extract_structured_note_from_block(elt)
@@ -1489,7 +1511,7 @@ def _harvest_footnote_class_definitions(soup: BeautifulSoup) -> Tuple[Dict[str, 
     if soup is None:
         return id_map, marker_defs
 
-    for p in soup.select(".footnote, .footnotet, .noindent-x1"):
+    for p in soup.select(".footnote, .footnotes, .footnotet, .noindent-x1"):
         tag_id = _safe_text(p.get("id") or "").strip()
 
         # Find the marker from the back-link <a> element.
