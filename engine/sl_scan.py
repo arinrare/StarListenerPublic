@@ -2697,6 +2697,28 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 soup_anchors = structured_soup_anchors
                 definitions = [dict(d) for d in structured_note_defs]
 
+        # Fallback: when structured definitions exist without element IDs
+        # (e.g. <p class="footnotes"> where the id is on an inner <a> tag),
+        # check if marker-based definitions cover most soup anchors by
+        # marker text.  If so, trust the structured definitions.
+        if not structured_notes_authoritative and structured_note_defs and soup_anchors:
+            def_markers_avail = set()
+            for d in structured_note_defs:
+                mk = d.get("marker")
+                if mk:
+                    def_markers_avail.add(str(mk))
+            if def_markers_avail:
+                matched = 0
+                total = 0
+                for a in soup_anchors:
+                    mk = a.get("marker")
+                    if mk and str(mk) in def_markers_avail:
+                        matched += 1
+                    total += 1
+                if total > 0 and matched >= 0.8 * total:
+                    structured_notes_authoritative = True
+                    definitions = [dict(d) for d in structured_note_defs]
+
         # Give soup anchors approximate positions so multi-heading grouping works.
         if soup_anchors:
             _assign_positions_to_soup_anchors(soup_anchors, lines, soup)
