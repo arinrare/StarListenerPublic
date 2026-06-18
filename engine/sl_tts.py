@@ -616,14 +616,18 @@ def _remove_notes_block(text: str) -> str:
         i for i, line in enumerate(lines)
         if _FN_MARKER_LINE_RE.match(line.rstrip("\r"))
     ]
-    if len(marker_idxs) >= 2:
-        cluster_start = marker_idxs[-1]
-        for j in range(len(marker_idxs) - 1, 0, -1):
-            if marker_idxs[j] - marker_idxs[j - 1] <= 4:
-                cluster_start = marker_idxs[j - 1]
+    # Only consider markers in the tail — definitions at chapter end,
+    # not prose markers scattered throughout the text.
+    tail_threshold = max(60, int(len(lines) * 0.15))
+    tail_markers = [m for m in marker_idxs if m >= len(lines) - tail_threshold]
+    if len(tail_markers) >= 1:
+        cluster_start = tail_markers[-1]
+        for j in range(len(tail_markers) - 1, 0, -1):
+            if tail_markers[j] - tail_markers[j - 1] <= 4:
+                cluster_start = tail_markers[j - 1]
             else:
                 break
-        if cluster_start > 0 and (len(lines) - cluster_start) <= max(80, len(lines) * 0.15):
+        if cluster_start > 0 and (len(lines) - cluster_start) <= tail_threshold:
             return "\n".join(lines[:cluster_start]).strip()
 
     return text
@@ -677,7 +681,6 @@ def _map_cleaned_pos_to_raw(cleaned: str, raw_text: str, cleaned_pos: int) -> in
 def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int]:
     pos = fn.get("position")
     if pos is None or not isinstance(pos, (int, float)) or pos < 0:
-        _fn_log("_find_anchor_in_raw", "bad_position", fn)
         pos = None
 
     if pos is not None:
@@ -700,13 +703,8 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
                 take_last = max(3, min(len(words), 8))
                 core_words = words[-take_last:]
                 try_word_match = True
-        if not try_word_match and pos is not None and pos >= len(cleaned_prep):
-            _fn_log("_find_anchor_in_raw", "pos_sentinel", fn, extra={"pos": pos, "cleaned_len": len(cleaned_prep)})
-    elif pos is not None:
-        _fn_log("_find_anchor_in_raw", "pos_sentinel", fn, extra={"pos": pos, "cleaned_len": len(cleaned_prep)})
 
     match = None
-    match_method = None
     if try_word_match and core_words:
         raw_norm = _normalize_ws(raw_text)
         for num_words in range(min(len(core_words), 8), 2, -1):
@@ -718,18 +716,14 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
                 continue
             if len(matches) == 1:
                 match = matches[0]
-                match_method = "word_match"
                 break
             elif len(matches) > 1:
                 pos_approx = int(fn.get("position", 0) or 0)
                 match = min(matches, key=lambda m: abs(m.start() - pos_approx))
-                match_method = "word_match"
                 break
 
     if match is None:
         match = _find_anchor_by_marker_fallback(raw_text, fn)
-        if match is not None:
-            match_method = "marker_fallback"
 
     if match is not None:
         raw_pos = 0
@@ -742,35 +736,13 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
             elif raw_pos == 0 or (raw_pos > 0 and not raw_text[raw_pos - 1].isspace()):
                 norm_idx += 1
             raw_pos += 1
-        _fn_log("_find_anchor_in_raw", "found", fn, extra={"raw_pos": raw_pos, "method": match_method})
         return raw_pos
 
     ctx_pos = _find_anchor_by_context(raw_text, fn)
     if ctx_pos is not None:
-        _fn_log("_find_anchor_in_raw", "found", fn, extra={"raw_pos": ctx_pos, "method": "context_fallback"})
         return ctx_pos
 
-    _fn_log("_find_anchor_in_raw", "all_methods_failed", fn)
     return None
-
-
-def _fn_log(func: str, reason: str, fn: dict, extra: dict = None) -> None:
-    try:
-        info = {
-            "status": "debug",
-            "func": func,
-            "reason": reason,
-            "marker": fn.get("marker"),
-            "position": fn.get("position"),
-            "chapter": fn.get("chapter_label") or fn.get("chapter_name", ""),
-            "confidence": fn.get("confidence_score"),
-        }
-        if extra:
-            info.update(extra)
-        sys.stderr.write(json.dumps(info) + "\n")
-        sys.stderr.flush()
-    except Exception:
-        pass
 
 
 _SUPERSCRIPT_DIGITS = {"0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3",
@@ -973,7 +945,6 @@ def _build_voice_segments(
             anchors.append((pos, fn))
         else:
             skipped_no_pos.append(fn)
-            _fn_log("_build_voice_segments", "no_anchor", fn)
 
     if not anchors:
         sys.stderr.write(json.dumps({
@@ -998,6 +969,12 @@ def _build_voice_segments(
         sentence_end = _find_sentence_end(raw_text, pos)
 
         prose = raw_text[last_pos:sentence_end + 1]
+        marker_raw = fn.get("marker_raw") or fn.get("marker", "")
+        if marker_raw and pos >= last_pos:
+            rel_pos = pos - last_pos
+            end_rel = rel_pos + len(marker_raw)
+            if end_rel <= len(prose) and prose[rel_pos:end_rel] == marker_raw:
+                prose = prose[:rel_pos] + prose[end_rel:]
         if prose.strip():
             segments.append(("prose", prose))
 
@@ -1006,10 +983,8 @@ def _build_voice_segments(
         if definition and str(definition).strip():
             segments.append(("footnote", f" Footnote {marker}: {definition}. End of footnote. "))
             inserted += 1
-            _fn_log("_build_voice_segments", "inserted", fn, extra={"pos": pos, "sentence_end": sentence_end, "last_pos_before": last_pos})
         else:
             skipped_no_def.append(fn)
-            _fn_log("_build_voice_segments", "no_definition", fn)
 
         last_pos = sentence_end + 1
 
@@ -1041,15 +1016,6 @@ def _build_voice_segments(
             remaining = remaining[:cut_pos].rstrip()
     if remaining.strip():
         segments.append(("prose", remaining))
-
-    sys.stderr.write(json.dumps({
-        "status": "debug", "func": "_build_voice_segments",
-        "total_fns": len(footnotes), "anchored": len(anchors),
-        "inserted": inserted,
-        "skipped_no_pos": len(skipped_no_pos),
-        "skipped_no_def": len(skipped_no_def),
-    }) + "\n")
-    sys.stderr.flush()
 
     return segments
 
