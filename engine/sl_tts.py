@@ -580,6 +580,8 @@ def _remove_notes_block(text: str) -> str:
     def_re = _def_line_regex()
     _DEF_COLON_RE = re.compile(r"^\s*:\s+.+")
     _BARE_DIGIT_RE = re.compile(r"^\s*\d{1,3}\s*$")
+    _ALPHANUM_DEF_RE = re.compile(r"^[a-zA-Z]{1,6}\d{1,3}[a-z]?\s+\S", re.UNICODE)
+    _FN_MARKER_LINE_RE = re.compile(r"^[a-zA-Z]{1,6}\d{1,3}[a-z]?$", re.UNICODE)
 
     last_non_def = len(lines)
     def_count = 0
@@ -591,7 +593,7 @@ def _remove_notes_block(text: str) -> str:
                 continue
             last_non_def = i
             continue
-        if def_re.match(stripped) or _DEF_COLON_RE.match(stripped):
+        if def_re.match(stripped) or _DEF_COLON_RE.match(stripped) or _ALPHANUM_DEF_RE.match(stripped):
             def_count += 1
             continue
         if _BARE_DIGIT_RE.match(stripped):
@@ -605,6 +607,24 @@ def _remove_notes_block(text: str) -> str:
 
     if def_count >= 2 or (def_count >= 1 and had_marker):
         return "\n".join(lines[:last_non_def]).strip()
+
+    # Third strategy: detect bare letter+digit marker clusters (e.g. fn1, fn12)
+    # where markers are on their own line followed by definition text below.
+    # Scan forward for consecutive bare-marker lines, and if a cluster of 2+
+    # is found near the end, truncate before the cluster.
+    marker_idxs = [
+        i for i, line in enumerate(lines)
+        if _FN_MARKER_LINE_RE.match(line.rstrip("\r"))
+    ]
+    if len(marker_idxs) >= 2:
+        cluster_start = marker_idxs[-1]
+        for j in range(len(marker_idxs) - 1, 0, -1):
+            if marker_idxs[j] - marker_idxs[j - 1] <= 4:
+                cluster_start = marker_idxs[j - 1]
+            else:
+                break
+        if cluster_start > 0 and (len(lines) - cluster_start) <= max(80, len(lines) * 0.15):
+            return "\n".join(lines[:cluster_start]).strip()
 
     return text
 
@@ -686,6 +706,7 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
         _fn_log("_find_anchor_in_raw", "pos_sentinel", fn, extra={"pos": pos, "cleaned_len": len(cleaned_prep)})
 
     match = None
+    match_method = None
     if try_word_match and core_words:
         raw_norm = _normalize_ws(raw_text)
         for num_words in range(min(len(core_words), 8), 2, -1):
@@ -697,13 +718,18 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
                 continue
             if len(matches) == 1:
                 match = matches[0]
+                match_method = "word_match"
                 break
             elif len(matches) > 1:
-                match = matches[-1]
+                pos_approx = int(fn.get("position", 0) or 0)
+                match = min(matches, key=lambda m: abs(m.start() - pos_approx))
+                match_method = "word_match"
                 break
 
     if match is None:
         match = _find_anchor_by_marker_fallback(raw_text, fn)
+        if match is not None:
+            match_method = "marker_fallback"
 
     if match is not None:
         raw_pos = 0
@@ -716,10 +742,12 @@ def _find_anchor_in_raw(raw_text: str, prep_text: str, fn: dict) -> Optional[int
             elif raw_pos == 0 or (raw_pos > 0 and not raw_text[raw_pos - 1].isspace()):
                 norm_idx += 1
             raw_pos += 1
+        _fn_log("_find_anchor_in_raw", "found", fn, extra={"raw_pos": raw_pos, "method": match_method})
         return raw_pos
 
     ctx_pos = _find_anchor_by_context(raw_text, fn)
     if ctx_pos is not None:
+        _fn_log("_find_anchor_in_raw", "found", fn, extra={"raw_pos": ctx_pos, "method": "context_fallback"})
         return ctx_pos
 
     _fn_log("_find_anchor_in_raw", "all_methods_failed", fn)
@@ -777,6 +805,9 @@ def _find_anchor_by_marker_fallback(raw_text: str, fn: dict) -> Optional[Any]:
         esc = re.escape(marker_str)
         patterns.append(r"(?<=\w)" + esc + r"(?=\s|[.,;:!?'\u2019\u201D\)\]\}]|$)")
     elif len(marker_str) == 1 and marker_str.isalpha():
+        esc = re.escape(marker_str)
+        patterns.append(r"(?<=\w)" + esc + r"(?=\s|[.,;:!?'\u2019\u201D\)\]\}]|$)")
+    elif re.fullmatch(r"[a-zA-Z]{1,6}\d{1,3}[a-z]?", marker_str, re.IGNORECASE):
         esc = re.escape(marker_str)
         patterns.append(r"(?<=\w)" + esc + r"(?=\s|[.,;:!?'\u2019\u201D\)\]\}]|$)")
 
@@ -942,6 +973,7 @@ def _build_voice_segments(
             anchors.append((pos, fn))
         else:
             skipped_no_pos.append(fn)
+            _fn_log("_build_voice_segments", "no_anchor", fn)
 
     if not anchors:
         sys.stderr.write(json.dumps({
@@ -970,13 +1002,14 @@ def _build_voice_segments(
             segments.append(("prose", prose))
 
         marker = fn.get("marker", "")
-        # Use manual rematch if set, otherwise engine suggestion.
         definition = fn.get("user_definition") or fn.get("suggested_definition", "")
         if definition and str(definition).strip():
             segments.append(("footnote", f" Footnote {marker}: {definition}. End of footnote. "))
             inserted += 1
+            _fn_log("_build_voice_segments", "inserted", fn, extra={"pos": pos, "sentence_end": sentence_end, "last_pos_before": last_pos})
         else:
             skipped_no_def.append(fn)
+            _fn_log("_build_voice_segments", "no_definition", fn)
 
         last_pos = sentence_end + 1
 

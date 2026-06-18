@@ -121,11 +121,11 @@ def _allowed_categories_for_profile(profile: str) -> Optional[set[str]]:
     if p in {"", "auto", "auto_heur", "auto_ai"}:
         return None
     if p == "numeric":
-        return {"num_paren", "num_bracket", "num_sup", "num_sub", "num_plain"}
+        return {"num_paren", "num_bracket", "num_sup", "num_sub", "num_plain", "symbol"}
     if p == "symbol":
         return {"symbol"}
     if p == "letter":
-        return {"let_paren", "let_bracket"}
+        return {"let_paren", "let_bracket", "symbol"}
     return None
 
 
@@ -1782,7 +1782,12 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 has_note_targets = True
                 break
         if has_note_targets and (looks_like_notes_file or len(fp_marker_defs) >= 1):
-            continue
+            # Only skip if the page has no substantive prose (pure footnote list).
+            # A page like "authors_note.html" has prose with footnotes — process it.
+            # A page like "notes.xhtml" has only footnote definitions — skip it.
+            prose_elts = soup.select("p:not(.footnote):not(.footnotes):not(.footnotet):not(.noindent-x1)")
+            if not prose_elts:
+                continue
 
         # Prefer explicit HTML anchors when present; then augment with regex anchors from main text.
         # Still rely on line-based notes parsing for definitions.
