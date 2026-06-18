@@ -610,25 +610,28 @@ def _remove_notes_block(text: str) -> str:
 
     # Third strategy: detect bare letter+digit marker clusters (e.g. fn1, fn12)
     # where markers are on their own line followed by definition text below.
-    # Scan forward for consecutive bare-marker lines, and if a cluster of 2+
-    # is found near the end, truncate before the cluster.
+    # Find all such markers, detect the last contiguous cluster, and check
+    # whether it sits at the very end of the text (definition block area).
     marker_idxs = [
         i for i, line in enumerate(lines)
         if _FN_MARKER_LINE_RE.match(line.rstrip("\r"))
     ]
-    # Only consider markers in the tail — definitions at chapter end,
-    # not prose markers scattered throughout the text.
-    tail_threshold = max(60, int(len(lines) * 0.15))
-    tail_markers = [m for m in marker_idxs if m >= len(lines) - tail_threshold]
-    if len(tail_markers) >= 1:
-        cluster_start = tail_markers[-1]
-        for j in range(len(tail_markers) - 1, 0, -1):
-            if tail_markers[j] - tail_markers[j - 1] <= 4:
-                cluster_start = tail_markers[j - 1]
+    if marker_idxs:
+        cluster_start = marker_idxs[-1]
+        for j in range(len(marker_idxs) - 1, 0, -1):
+            if marker_idxs[j] - marker_idxs[j - 1] <= 4:
+                cluster_start = marker_idxs[j - 1]
             else:
                 break
-        if cluster_start > 0 and (len(lines) - cluster_start) <= tail_threshold:
-            return "\n".join(lines[:cluster_start]).strip()
+        last_marker = marker_idxs[-1]
+        near_end = (len(lines) - last_marker) <= 8
+        if near_end:
+            if len(marker_idxs) >= 2:
+                return "\n".join(lines[:cluster_start]).strip()
+            elif len(marker_idxs) == 1:
+                m = marker_idxs[0]
+                if m + 1 < len(lines) and lines[m + 1].rstrip("\r").strip():
+                    return "\n".join(lines[:m]).strip()
 
     return text
 
