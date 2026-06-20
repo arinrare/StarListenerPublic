@@ -76,7 +76,7 @@ def _preprocess_for_notes(text: str) -> str:
         # In likely notes blocks, split numbered items onto their own lines.
         # This is conservative: only triggers after a NOTES header has been introduced.
         # Examples: "1." "2." "A." "*" etc.
-        t = re.sub(r"(?m)(^\s*(?:FOOTNOTES|ENDNOTES|NOTES)\s*$)([\s\S]+)$", lambda m: m.group(1) + "\n" + re.sub(r"\s+(\d{1,3}|[A-Za-z]|\*+|†+|‡+|§+)\.\s+", r"\n\1. ", m.group(2)), t)
+        t = re.sub(r"(?m)(^\s*(?:FOOTNOTES|ENDNOTES|NOTES)\s*$)([\s\S]+)$", lambda m: m.group(1) + "\n" + re.sub(r"\s+(\d{1,3}|[A-Za-z]{1,4}\d{1,3}|[A-Za-z]|\*+|†+|‡+|§+)\.\s+", r"\n\1. ", m.group(2)), t)
         return t
 
 # Normalization function for footnote markers to a stable key format.
@@ -153,7 +153,7 @@ def _def_line_regex() -> re.Pattern:
         # Guard: do NOT treat page references like "p. 178" / "pp. 21-2" as
         # definition markers. These are common inside critical editions and can
         # otherwise be misread as a letter-marker definition with marker 'p'.
-        r"^(?!\s*(?:\[|\()?\s*p{1,2}\s*\.)\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|[⁰¹²³⁴⁵⁶⁷⁸⁹]{1,4}|[₀₁₂₃₄₅₆₇₈₉]{1,4}|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*|\s+)(?:↩|\u21A9)?\s*(.+?)\s*$",
+        r"^(?!\s*(?:\[|\()?\s*p{1,2}\s*\.)\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z]|[⁰¹²³⁴⁵⁶⁷⁸⁹]{1,4}|[₀₁₂₃₄₅₆₇₈₉]{1,4}|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*|\s+)(?:↩|\u21A9)?\s*(.+?)\s*$",
         re.UNICODE,
     )
 

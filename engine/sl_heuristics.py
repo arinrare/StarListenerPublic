@@ -46,14 +46,14 @@ def infer_notes_continuation_harvest_start(lines: List[str]) -> Optional[int]:
     # fallback and must not treat ordinary prose like `I had ...` or `A peculiarity ...`
     # as note definitions.
     def_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*[\]\)\.:\-—]\s+(.+?)\s*$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*[\]\)\.:\-—]\s+(.+?)\s*$",
         re.UNICODE,
     )
     # Marker-only lines appear in some EPUB conversions:
     #   13.
     #   Eldils: ...
     marker_only_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*[\]\)\.:\-—]\s*$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*[\]\)\.:\-—]\s*$",
         re.UNICODE,
     )
 
@@ -822,7 +822,7 @@ def _ns_notes_header(inp: NotesSplitInput) -> Optional[NotesSplitResult]:
     if not lines:
         return None
     marker_only_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?$",
         re.UNICODE,
     )
 

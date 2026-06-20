@@ -983,7 +983,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         total_bidi_defs = 0
         referenced_def_ids: set[str] = set()
         anchor_files_with_bidi: set[int] = set()
-        _small_marker_re = re.compile(r"^\s*[\(\[]?\s*(?:\d{1,3}|\*+|\u2020+|\u2021+|\u00a7+|[a-zA-Z])\s*[\)\]]?\s*$", re.UNICODE)
+        _small_marker_re = re.compile(r"^\s*[\(\[]?\s*(?:\d{1,3}|\*+|\u2020+|\u2021+|\u00a7+|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z])\s*[\)\]]?\s*$", re.UNICODE)
 
         for idx, it in enumerate(items):
             try:
@@ -1220,7 +1220,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
     # Common fragment/id naming schemes for note targets.
     # This is used for harvesting *definitions* and for identifying note-target pages.
     id_re = re.compile(
-        r"^(?:fn|fnref|fnt|footnote|footnoteref|note|noteref|endnote|en|ref|n)[-_]?\d{1,4}[a-z]?$",
+        r"^(?:fn|fnref|fnt|footnote|footnoteref|note|noteref|endnote|en|ref|n)[-_]?\d{1,4}(?:[-_]\d{1,4})?[a-z]?$",
         re.IGNORECASE,
     )
     _pt4en_id_re = re.compile(r"^r?pt4en\d{1,4}[a-z]?$", re.IGNORECASE)
@@ -1624,7 +1624,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         # notes-header occurrences and parse definitions after each.
         try:
             marker_only_re = re.compile(
-                r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?\s*$",
+                r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z]|\*+|†+|‡+|§+)\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?\s*$",
                 re.UNICODE,
             )
             def_like_re = _def_line_regex()
@@ -1805,7 +1805,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         # it's a pure footnote-definition page -- skip it (defs already harvested in Pass 1).
         if structured_footnote_epub:
             has_footnote_defs = bool(soup.select(".footnote, .footnotes, .footnotet, .noindent-x1"))
-            _small_marker_skip_re = re.compile(r"^\s*(?:\d{1,3}|\*+|\u2020+|\u2021+|\u00a7+|[a-zA-Z])\s*$", re.UNICODE)
+            _small_marker_skip_re = re.compile(r"^\s*(?:\d{1,3}|\*+|\u2020+|\u2021+|\u00a7+|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z])\s*$", re.UNICODE)
             has_prose_anchors = any(
                 _small_marker_skip_re.match(_safe_text(a.get_text(" ")).strip())
                 and "#" in _safe_text(a.get("href") or "").strip()
@@ -4365,8 +4365,13 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             if not isinstance(hpos, int) or hpos < 0:
                                 continue
                             li = bisect.bisect_right(line_starts, hpos) - 1
-                            if 0 <= li < len(excluded) and excluded[li]:
-                                continue
+                        if 0 <= li < len(excluded) and excluded[li]:
+                            href = a.get("href")
+                            if href and "#" in href:
+                                frag = href.rsplit("#", 1)[-1].strip()
+                                if frag and frag in global_defs_by_id:
+                                    filtered_soup.append(a)
+                            continue
                             filtered_heads.append((hpos, hlabel))
                         local_heads = filtered_heads
                     except Exception:

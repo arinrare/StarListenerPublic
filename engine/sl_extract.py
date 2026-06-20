@@ -698,7 +698,7 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
     # Keep this conservative; this is only a *candidate* signal (combined with
     # other signals like epub:type=noteref or <sup> containment).
     id_re = re.compile(
-        r"^(?:fn|fnref|fnt|footnote|footnoteref|note|noteref|endnote|en|ref|n)[-_]?\d{1,4}[a-z]?$",
+        r"^(?:fn|fnref|fnt|footnote|footnoteref|note|noteref|endnote|en|ref|n)[-_]?\d{1,4}(?:[-_]\d{1,4})?[a-z]?$",
         re.IGNORECASE,
     )
     _pt4en_id_re = re.compile(r"^r?pt4en\d{1,4}[a-z]?$", re.IGNORECASE)
@@ -1166,6 +1166,8 @@ def _harvest_structured_notes_section_targets(soup: BeautifulSoup) -> Tuple[Dict
             return None
 
         tag_id = _safe_text(getattr(tag, "get", lambda _k, _d=None: None)("id") or "").strip()
+        if not tag_id and first_anchor is not None:
+            tag_id = _safe_text(first_anchor.get("id") or "").strip()
         return {"id": tag_id, "marker": marker_norm, "text": body, "tag_name": tag_name}
 
     def _candidate_blocks_from_node(node: Any) -> List[Any]:
@@ -1694,7 +1696,7 @@ def _extract_definitions_from_lines(lines: List[str], start_index: int) -> List[
     double_numeric_marker_only_re = re.compile(r"^\s*(\d{1,3})\.\s*(\d{1,3})\.\s*$", re.UNICODE)
     page_ref_re = re.compile(r"^\s*p{1,2}\.\s*\d", re.IGNORECASE)
     marker_only_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|ΓÇá+|ΓÇí+|┬º+)\s*(?:\]|\))?\s*(?:[\]\)\.\:\-ΓÇö]\s*)?(?:Γå⌐|\u21A9)?\s*$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z]|\*+|ΓÇá+|ΓÇí+|┬º+)\s*(?:\]|\))?\s*(?:[\]\)\.\:\-ΓÇö]\s*)?(?:Γå⌐|\u21A9)?\s*$",
         re.UNICODE,
     )
     def_like_re = _def_line_regex()
@@ -2046,7 +2048,7 @@ def _extract_definitions_from_lines_scoped(
     double_numeric_marker_only_re = re.compile(r"^\s*(\d{1,3})\.\s*(\d{1,3})\.\s*$", re.UNICODE)
     page_ref_re = re.compile(r"^\s*p{1,2}\.\s*\d", re.IGNORECASE)
     marker_only_re = re.compile(
-        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]|\*+|ΓÇá+|ΓÇí+|┬º+)\s*(?:\]|\))?\s*(?:[\]\)\.\:\-ΓÇö]\s*)?(?:Γå⌐|\u21A9)?\s*$",
+        r"^\s*(?:\[|\()?\s*(\d{1,3}|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z]|\*+|ΓÇá+|ΓÇí+|┬º+)\s*(?:\]|\))?\s*(?:[\]\)\.\:\-ΓÇö]\s*)?(?:Γå⌐|\u21A9)?\s*$",
         re.UNICODE,
     )
     def_like_re = _def_line_regex()
