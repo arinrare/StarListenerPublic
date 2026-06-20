@@ -2329,7 +2329,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
                         # If the next item looks like it's *only* notes/definitions,
                         # skip scanning it to avoid emitting duplicates.
-                        if len(extra_defs) >= 6 and not _prefix_looks_like_new_chapter(next_lines[: min(60, len(next_lines))]):
+                        if len(extra_defs) >= 10 and not _prefix_looks_like_new_chapter(next_lines[: min(60, len(next_lines))]):
                             # IMPORTANT: some spine items contain a NOTES/definitions run
                             # and then continue with the next chapter/prose. In those
                             # cases, skipping the entire next item would drop anchors
@@ -2737,6 +2737,11 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             continue
                         li = bisect.bisect_right(line_starts, pos) - 1
                         if 0 <= li < len(excluded) and excluded[li]:
+                            href = a.get("href")
+                            if href and "#" in href:
+                                frag = href.rsplit("#", 1)[-1].strip()
+                                if frag and frag in global_defs_by_id:
+                                    filtered_soup.append(a)
                             continue
                         filtered_soup.append(a)
                     soup_anchors = filtered_soup
@@ -4365,13 +4370,8 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             if not isinstance(hpos, int) or hpos < 0:
                                 continue
                             li = bisect.bisect_right(line_starts, hpos) - 1
-                        if 0 <= li < len(excluded) and excluded[li]:
-                            href = a.get("href")
-                            if href and "#" in href:
-                                frag = href.rsplit("#", 1)[-1].strip()
-                                if frag and frag in global_defs_by_id:
-                                    filtered_soup.append(a)
-                            continue
+                            if 0 <= li < len(excluded) and excluded[li]:
+                                continue
                             filtered_heads.append((hpos, hlabel))
                         local_heads = filtered_heads
                     except Exception:
