@@ -617,7 +617,21 @@ def _infer_logical_chapter_label(lines: List[str]) -> Optional[str]:
         if m_inline:
             token = _safe_text(m_inline.group(1)).rstrip(".")
             allow_mid = _is_roman_token(token) or _allow_arabic_heading(i)
+            # For Arabic numerals past line 120, still allow when the
+            # heading text is strongly ALLCAPS (not a sub-heading).
+            if not allow_mid and re.fullmatch(r"\d{1,3}", token):
+                rest = _safe_text(m_inline.group(2) or "")
+                rest_letters = [ch for ch in rest if ch.isalpha()]
+                if (
+                    len(rest_letters) >= 6
+                    and (sum(1 for ch in rest_letters if ch.isupper()) / max(1, len(rest_letters))) >= 0.90
+                ):
+                    allow_mid = True
             if allow_mid and (_is_probable_heading(m_inline.group(2)) or _is_title_case_heading(m_inline.group(2))):
+                num = token + "."
+                head = _safe_text(m_inline.group(2))
+                return f"{num} {head}".strip()
+            elif allow_mid and _looks_like_chapter_heading_text(t):
                 num = token + "."
                 head = _safe_text(m_inline.group(2))
                 return f"{num} {head}".strip()
@@ -996,7 +1010,7 @@ def _find_chapter_headings_in_text(text: str) -> List[Tuple[int, str]]:
             if not t0:
                 return
             t0 = _strip_trailing_footnote_marker_from_heading(t0) or t0
-            if _is_notes_header_line(t0) or def_re.match(t0):
+            if _is_notes_header_line(t0) or (def_re.match(t0) and not _looks_like_chapter_heading_text(t0)):
                 return
 
             # Strong single-line boundaries that are common in critical editions.
@@ -1170,8 +1184,14 @@ def _find_chapter_headings_in_text(text: str) -> List[Tuple[int, str]]:
                             offset += len(raw) + 1
                             continue
                     else:
-                        offset += len(raw) + 1
-                        continue
+                        # m_head (numeral+dot+heading) didn't match, but the
+                        # line matched def_re. It may still be a real chapter
+                        # heading like "9 OF MEN" (numeral + ALLCAPS, no dot).
+                        if _looks_like_chapter_heading_text(t):
+                            looks_like_real_heading = True
+                        else:
+                            offset += len(raw) + 1
+                            continue
                 except Exception:
                     offset += len(raw) + 1
                     continue
@@ -1330,7 +1350,26 @@ def _find_chapter_headings_in_text(text: str) -> List[Tuple[int, str]]:
                 if m_inline:
                     token = _safe_text(m_inline.group(1)).rstrip(".")
                     allow_mid = _is_roman_token(token) or _allow_arabic_heading(i)
+                    # For Arabic numerals past line 120, still allow when the
+                    # heading text is strongly ALLCAPS (not a sub-heading).
+                    if not allow_mid and re.fullmatch(r"\d{1,3}", token):
+                        rest = _safe_text(m_inline.group(2) or "")
+                        rest_letters = [ch for ch in rest if ch.isalpha()]
+                        if (
+                            len(rest_letters) >= 6
+                            and (sum(1 for ch in rest_letters if ch.isupper()) / max(1, len(rest_letters))) >= 0.90
+                        ):
+                            allow_mid = True
                     if allow_mid and (_is_probable_heading(m_inline.group(2)) or _is_title_case_heading(m_inline.group(2))):
+                        num = token + "."
+                        head = _safe_text(m_inline.group(2))
+                        headings.append((offset, _prepend_prefix_title(i, f"{num} {head}")))
+                        notes_run_active = False
+                        recent_def_idxs = []
+                    elif allow_mid and _looks_like_chapter_heading_text(t_clean):
+                        # Short ALLCAPS heading rest (e.g. "OF MEN" in "9 OF MEN")
+                        # is too short for the individual checks above, but the
+                        # combined numeral+heading line passes chapter detection.
                         num = token + "."
                         head = _safe_text(m_inline.group(2))
                         headings.append((offset, _prepend_prefix_title(i, f"{num} {head}")))

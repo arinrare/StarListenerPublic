@@ -862,6 +862,15 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         if not (frag and (id_re.match(frag) or _is_rst_frag or _is_st_frag or _pt4en_id_re.match(frag))) and not is_noteref(a) and not _is_superscript_related(a):
             continue
 
+        # Track whether the href fragment matches a recognised footnote-ID
+        # naming scheme (fn, ref, note, rfn, st/rst, pt4en, etc.). Anchors with
+        # such fragments are genuine bidirectional footnote links and should not
+        # be dropped just because their visible marker text is non-standard
+        # (e.g. "p. 407" for Author's Notes).
+        _frag_is_footnote_id = bool(
+            frag and (id_re.match(frag) or _is_rst_frag or _is_st_frag or _pt4en_id_re.match(frag))
+        )
+
         txt = _safe_text(a.get_text(" "))
         marker_txt = txt
         if not marker_txt:
@@ -874,6 +883,22 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
             m = re.fullmatch(r"\s*[\(\[]?\s*(\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z])\s*[\)\]]?\s*\.?\s*", marker_txt)
             if m:
                 marker_txt = m.group(1)
+
+        # When an id-link anchor's visible text is a page reference
+        # (e.g. "p. 407") it won't pass the small-marker check below.
+        # Extract the page number so the anchor can be paired with its
+        # definition — but only when the parent context contains an
+        # explicit note reference (e.g. "(Note 1, p. 407)").  This
+        # prevents capturing bare page cross-references that happen
+        # to use id_re-matching fragments.
+        _page_ref_extracted = False
+        if _frag_is_footnote_id:
+            _page_ref = re.match(r"^\s*(?:p|pp)\.?\s*(\d{1,3})\s*\)?\s*$", marker_txt, re.IGNORECASE)
+            if _page_ref:
+                _parent_text = _context_text_for_tag(a, txt)
+                if re.search(r"\bNote\s+\d{1,3}\b", _parent_text, re.IGNORECASE):
+                    marker_txt = _page_ref.group(1)
+                    _page_ref_extracted = True
 
         # Only accept small marker-like texts.
         if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3}", marker_txt or ""):
@@ -893,7 +918,11 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         #
         # Only apply to non-superscript anchors: real footnotes live in <sup> tags
         # and should never be suppressed by cross-reference patterns.
-        if not _is_superscript_related(a):
+        # Also skip when the marker was explicitly extracted from a page
+        # reference in a note context (e.g. Author's Notes) — the fragment
+        # match plus the note-context check are stronger signals than the
+        # cross-reference heuristic.
+        if not _is_superscript_related(a) and not _page_ref_extracted:
             try:
                 # Search only the ±220-char window around the anchor (parent_text),
                 # not the full paragraph. This prevents false suppression when a
