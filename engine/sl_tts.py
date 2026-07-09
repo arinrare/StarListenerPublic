@@ -992,10 +992,13 @@ def _build_voice_segments(
         last_pos = sentence_end + 1
 
     remaining = _remove_notes_block(raw_text[last_pos:])
-    if remaining == raw_text[last_pos:]:
+    if remaining == raw_text[last_pos:] and last_pos > 0:
         # _remove_notes_block returned the tail unchanged (no notes block
         # detected by header or definition-cluster heuristics).  Search for
         # the known definition texts and truncate from the earliest match.
+        # Only do this when at least one anchor was processed — otherwise
+        # the search runs against the full text and can match chapter
+        # headings or other common phrases, cutting the text prematurely.
         _bare_digit_line_re = re.compile(r"^\s*\d{1,3}\s*$")
         cut_pos = len(remaining)
         for fn in footnotes:
