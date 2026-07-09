@@ -694,6 +694,12 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
 
     anchors: List[Dict[str, Any]] = []
 
+    # Track occurrences of identical visible text within the same parent
+    # paragraph.  When multiple notes share a page number (e.g. three
+    # "p. 408" anchors in one paragraph), we need to pair each occurrence
+    # with the correct preceding "Note N".
+    _page_text_counter: Dict[Tuple[int, str], int] = {}
+
     # Common fragment id naming schemes for note targets.
     # Keep this conservative; this is only a *candidate* signal (combined with
     # other signals like epub:type=noteref or <sup> containment).
@@ -857,10 +863,21 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         # Direction 2 (Book 12): anchor=rst{N}, fragment=st{N}
         _is_rst_frag = bool(frag and re.match(r"^rst\d+[a-z]?$", frag, re.IGNORECASE))
         _is_st_frag = bool(frag and re.match(r"^st\d+[a-z]?$", frag, re.IGNORECASE))
+        _is_rss_frag = bool(frag and re.match(r"^rss\d+[a-z]?$", frag, re.IGNORECASE))
         # Only consider anchors that look like they reference a footnote target.
         # This prevents TOC/section navigation links (e.g., "Foreword", chapter titles) from being treated as footnotes.
-        if not (frag and (id_re.match(frag) or _is_rst_frag or _is_st_frag or _pt4en_id_re.match(frag))) and not is_noteref(a) and not _is_superscript_related(a):
-            continue
+        # rss-prefixed fragments only qualify when the visible text is a page
+        # reference — otherwise they are cross-references, not footnotes.
+        _frag_matches = bool(
+            frag and (id_re.match(frag) or _is_rst_frag or _is_st_frag or _pt4en_id_re.match(frag))
+        )
+        if not _frag_matches:
+            if _is_rss_frag:
+                _txt_rss = _safe_text(a.get_text(" "))
+                if not re.match(r"^\s*(?:p|pp)\.?\s*\d{1,3}\s*\)?\s*$", _txt_rss, re.IGNORECASE):
+                    continue
+            elif not is_noteref(a) and not _is_superscript_related(a):
+                continue
 
         # Track whether the href fragment matches a recognised footnote-ID
         # naming scheme (fn, ref, note, rfn, st/rst, pt4en, etc.). Anchors with
@@ -868,7 +885,7 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         # be dropped just because their visible marker text is non-standard
         # (e.g. "p. 407" for Author's Notes).
         _frag_is_footnote_id = bool(
-            frag and (id_re.match(frag) or _is_rst_frag or _is_st_frag or _pt4en_id_re.match(frag))
+            frag and (id_re.match(frag) or _is_rst_frag or _is_st_frag or _is_rss_frag or _pt4en_id_re.match(frag))
         )
 
         txt = _safe_text(a.get_text(" "))
@@ -884,20 +901,67 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
             if m:
                 marker_txt = m.group(1)
 
-        # When an id-link anchor's visible text is a page reference
-        # (e.g. "p. 407") it won't pass the small-marker check below.
-        # Extract the page number so the anchor can be paired with its
-        # definition — but only when the parent context contains an
-        # explicit note reference (e.g. "(Note 1, p. 407)").  This
-        # prevents capturing bare page cross-references that happen
-        # to use id_re-matching fragments.
+        # When an id-link anchor is part of an Author's/Editor's note
+        # reference (e.g. "(Note 1, p. 407)" or "Note 16, p. 412"),
+        # its visible text may be a page reference or the note name
+        # itself — neither of which passes the small-marker check below.
+        # Extract the note *number* as the marker so it matches the
+        # definition and doesn't collide with other notes on the same page.
         _page_ref_extracted = False
         if _frag_is_footnote_id:
+            # Case A: visible text is "p. 407" or "pp. 21-2".
+            # Find the nearest preceding "Note N" in the parent text.
             _page_ref = re.match(r"^\s*(?:p|pp)\.?\s*(\d{1,3})\s*\)?\s*$", marker_txt, re.IGNORECASE)
             if _page_ref:
                 _parent_text = _context_text_for_tag(a, txt)
-                if re.search(r"\bNote\s+\d{1,3}\b", _parent_text, re.IGNORECASE):
-                    marker_txt = _page_ref.group(1)
+                _page_num = _page_ref.group(1)
+                # Multiple notes in the same paragraph may share
+                # a page number.  Count occurrences of this visible
+                # text to find the correct "p. NNN" position.
+                _pkey = (hash(_parent_text), txt)
+                _pcnt = _page_text_counter.get(_pkey, 0) + 1
+                _page_text_counter[_pkey] = _pcnt
+                _txt_pos = -1
+                _tmp = 0
+                _remaining = _pcnt
+                while _remaining > 0:
+                    _tmp = _parent_text.find(txt, _tmp)
+                    if _tmp < 0:
+                        break
+                    _remaining -= 1
+                    if _remaining == 0:
+                        _txt_pos = _tmp
+                        break
+                    _tmp += len(txt)
+                # Walk backward from this occurrence to find the
+                # nearest preceding "Note N".
+                _best_note_num = None
+                _best_dist = None
+                for _nm in re.finditer(r"\bNote\s+(\d{1,3})\b", _parent_text, re.IGNORECASE):
+                    if _txt_pos >= 0 and _nm.end() > _txt_pos:
+                        break
+                    dist = _txt_pos - _nm.end() if _txt_pos >= 0 else 0
+                    if _best_dist is None or dist < _best_dist:
+                        _best_dist = dist
+                        _best_note_num = _nm.group(1)
+                if _best_note_num is not None:
+                    marker_txt = _best_note_num
+                    _page_ref_extracted = True
+            # Case B: visible text is "Note 16" itself — the link
+            # encloses the note name rather than a page reference.
+            # Only accept when the parent text contains both the
+            # note number AND a nearby page reference (e.g.
+            # "Note 16, p. 412"), the signature of an Author's Note.
+            _note_label = re.match(r"^\s*Note\s+(\d{1,3})\s*$", marker_txt, re.IGNORECASE)
+            if _note_label:
+                _note_num = _note_label.group(1)
+                _parent_text = _context_text_for_tag(a, txt)
+                if re.search(
+                    rf"\bNote\s+{_note_num}\s*[,;]\s*p\.?\s*\d{{1,3}}",
+                    _parent_text,
+                    re.IGNORECASE,
+                ):
+                    marker_txt = _note_num
                     _page_ref_extracted = True
 
         # Only accept small marker-like texts.

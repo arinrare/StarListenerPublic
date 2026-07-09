@@ -710,14 +710,9 @@ document.addEventListener('DOMContentLoaded', async function() {
             const items = chapters[chKey].slice();
 
             items.sort((a, b) => {
-                // Primary: order by where the anchor occurs in the running text.
-                // Do NOT sort by numeric marker first: some EPUBs have out-of-order numbering,
-                // and we want the list to match reading order.
                 const ao = getOrderValue(a);
                 const bo = getOrderValue(b);
                 if (ao !== bo) return ao - bo;
-
-                // Tie-breakers: marker value (numeric if possible), then marker string.
                 const am = tryMarkerInt(a && a.marker);
                 const bm = tryMarkerInt(b && b.marker);
                 if (am != null && bm != null && am !== bm) return am - bm;
@@ -727,6 +722,12 @@ document.addEventListener('DOMContentLoaded', async function() {
             });
             const pairedCount = items.filter(x => !!x.suggested_definition).length;
             const reviewCount = items.length - pairedCount;
+
+            // Wrap each chapter in a container so card queries are scoped.
+            const chapterWrapper = document.createElement('div');
+            chapterWrapper.className = 'chapter-wrapper';
+            chapterWrapper.setAttribute('data-chapter-key', chKey);
+            container.appendChild(chapterWrapper);
 
             const header = document.createElement('div');
             header.className = 'footnote-group';
@@ -739,36 +740,10 @@ document.addEventListener('DOMContentLoaded', async function() {
                     </div>
                 </div>
             `;
-            container.appendChild(header);
+            chapterWrapper.appendChild(header);
 
-            // Wire chapter Confirm button
-            header.querySelector('.chapter-confirm-btn').addEventListener('click', async () => {
-                for (const it of items) {
-                    it.user_status = 'confirmed';
-                }
-                if (_nmPath) {
-                    await window.electronAPI.writeJsonFile(_nmPath, _matches);
-                    lastScanResults = JSON.parse(JSON.stringify(_matches));
-                }
-                const cards = header.parentElement.querySelectorAll('.footnote-card');
-                cards.forEach(c => { c.style.opacity = '0.3'; });
-            });
-
-            // Wire chapter Ignore button
-            header.querySelector('.chapter-ignore-btn').addEventListener('click', async () => {
-                for (const it of items) {
-                    it.user_status = 'ignored';
-                }
-                if (_nmPath) {
-                    await window.electronAPI.writeJsonFile(_nmPath, _matches);
-                    lastScanResults = JSON.parse(JSON.stringify(_matches));
-                }
-                const cards = header.parentElement.querySelectorAll('.footnote-card');
-                cards.forEach(c => { c.style.opacity = '0.3'; });
-            });
-
+            // Build each card in this chapter.
             items.forEach((item, index) => {
-                console.log(`Processing item ${index}:`, item);
                 const card = document.createElement('div');
                 card.className = 'footnote-card';
                 card.setAttribute('data-id', item.id != null ? item.id : index);
@@ -808,6 +783,14 @@ document.addEventListener('DOMContentLoaded', async function() {
 
                 const hrefLine = item.href ? `<div class="badge" style="margin-top: 6px;">Link: ${escapeHtml(item.href)}</div>` : '';
 
+                // Button text depends on current status.
+                const isConfirmed = item.user_status === 'confirmed';
+                const isIgnored = item.user_status === 'ignored';
+                const confirmText = isConfirmed ? 'Unconfirm' : 'Confirm Link';
+                const ignoreText = isIgnored ? 'Unignore' : 'Ignore';
+                const confirmDisplay = isIgnored ? 'display:none;' : '';
+                const ignoreDisplay = isConfirmed ? 'display:none;' : '';
+
                 card.innerHTML = `
                     <div class="pair-view" style="display: flex; gap: 15px; align-items: flex-start;">
                         <div style="flex: 1;">
@@ -836,22 +819,120 @@ document.addEventListener('DOMContentLoaded', async function() {
                     </div>
                     
                     <div class="card-actions" style="margin-top: 15px; text-align: right;">
-                        <button class="ignore-btn">Ignore</button>
-                        <button class="confirm-btn" style="background: #3d5afe; color: white;">Confirm Link</button>
+                        <button class="ignore-btn" style="${ignoreDisplay}">${ignoreText}</button>
+                        <button class="confirm-btn" style="background: #3d5afe; color: white; ${confirmDisplay}">${confirmText}</button>
                     </div>
                 `;
-                container.appendChild(card);
+                chapterWrapper.appendChild(card);
 
                 // Apply button outlines for persisted state.
-                if (item.user_status === 'confirmed') {
+                if (isConfirmed) {
                     const cb = card.querySelector('.confirm-btn');
                     if (cb) cb.style.outline = '2px solid #4caf50';
-                } else if (item.user_status === 'ignored') {
+                } else if (isIgnored) {
                     const ib = card.querySelector('.ignore-btn');
                     if (ib) ib.style.outline = '2px solid #ff9800';
                 }
+            });
 
-                console.log(`Card ${index} created`);
+            // ----- Helper: update a single card's button state -----
+            const _updateCardButtons = (card, item) => {
+                const confirmBtn = card.querySelector('.confirm-btn');
+                const ignoreBtn = card.querySelector('.ignore-btn');
+                const isConfirmed = item.user_status === 'confirmed';
+                const isIgnored = item.user_status === 'ignored';
+
+                card.style.opacity = (isConfirmed || isIgnored) ? '0.3' : '';
+
+                if (confirmBtn) {
+                    if (isConfirmed) {
+                        confirmBtn.textContent = 'Unconfirm';
+                        confirmBtn.style.display = '';
+                        confirmBtn.style.outline = '2px solid #4caf50';
+                    } else {
+                        confirmBtn.textContent = 'Confirm Link';
+                        confirmBtn.style.display = isIgnored ? 'none' : '';
+                        confirmBtn.style.outline = 'none';
+                    }
+                }
+                if (ignoreBtn) {
+                    if (isIgnored) {
+                        ignoreBtn.textContent = 'Unignore';
+                        ignoreBtn.style.display = '';
+                        ignoreBtn.style.outline = '2px solid #ff9800';
+                    } else {
+                        ignoreBtn.textContent = 'Ignore';
+                        ignoreBtn.style.display = isConfirmed ? 'none' : '';
+                        ignoreBtn.style.outline = 'none';
+                    }
+                }
+            };
+
+            // ----- Helper: update chapter header button state -----
+            const _updateChapterButtons = () => {
+                const cards = chapterWrapper.querySelectorAll('.footnote-card');
+                let allConfirmed = cards.length > 0;
+                let allIgnored = cards.length > 0;
+                cards.forEach(card => {
+                    const idAttr = card.getAttribute('data-id');
+                    const id = idAttr != null ? Number(idAttr) : null;
+                    const it = id != null ? items.find(m => m.id === id) : null;
+                    if (!it || it.user_status !== 'confirmed') allConfirmed = false;
+                    if (!it || it.user_status !== 'ignored') allIgnored = false;
+                });
+
+                const confirmBtn = header.querySelector('.chapter-confirm-btn');
+                const ignoreBtn = header.querySelector('.chapter-ignore-btn');
+                if (allConfirmed) {
+                    if (confirmBtn) { confirmBtn.textContent = 'Unconfirm Chapter'; confirmBtn.style.display = ''; }
+                    if (ignoreBtn) ignoreBtn.style.display = 'none';
+                } else if (allIgnored) {
+                    if (ignoreBtn) { ignoreBtn.textContent = 'Unignore Chapter'; ignoreBtn.style.display = ''; }
+                    if (confirmBtn) confirmBtn.style.display = 'none';
+                } else {
+                    if (confirmBtn) { confirmBtn.textContent = 'Confirm Chapter'; confirmBtn.style.display = ''; }
+                    if (ignoreBtn) { ignoreBtn.textContent = 'Ignore Chapter'; ignoreBtn.style.display = ''; }
+                }
+            };
+            _updateChapterButtons();
+
+            // ----- Chapter Confirm button -----
+            header.querySelector('.chapter-confirm-btn').addEventListener('click', async () => {
+                const allConfirmed = items.every(it => it.user_status === 'confirmed');
+                for (const it of items) {
+                    it.user_status = allConfirmed ? undefined : 'confirmed';
+                }
+                if (_nmPath) {
+                    await window.electronAPI.writeJsonFile(_nmPath, _matches);
+                    lastScanResults = JSON.parse(JSON.stringify(_matches));
+                }
+                // Update every card in this chapter.
+                chapterWrapper.querySelectorAll('.footnote-card').forEach(card => {
+                    const idAttr = card.getAttribute('data-id');
+                    const id = idAttr != null ? Number(idAttr) : null;
+                    const it = id != null ? items.find(m => m.id === id) : null;
+                    if (it) _updateCardButtons(card, it);
+                });
+                _updateChapterButtons();
+            });
+
+            // ----- Chapter Ignore button -----
+            header.querySelector('.chapter-ignore-btn').addEventListener('click', async () => {
+                const allIgnored = items.every(it => it.user_status === 'ignored');
+                for (const it of items) {
+                    it.user_status = allIgnored ? undefined : 'ignored';
+                }
+                if (_nmPath) {
+                    await window.electronAPI.writeJsonFile(_nmPath, _matches);
+                    lastScanResults = JSON.parse(JSON.stringify(_matches));
+                }
+                chapterWrapper.querySelectorAll('.footnote-card').forEach(card => {
+                    const idAttr = card.getAttribute('data-id');
+                    const id = idAttr != null ? Number(idAttr) : null;
+                    const it = id != null ? items.find(m => m.id === id) : null;
+                    if (it) _updateCardButtons(card, it);
+                });
+                _updateChapterButtons();
             });
         });
 
@@ -862,26 +943,82 @@ document.addEventListener('DOMContentLoaded', async function() {
             btn.addEventListener('click', async function() {
                 const card = this.closest('.footnote-card');
                 if (!card) return;
+                const chapterWrapper = card.closest('.chapter-wrapper');
                 const idAttr = card.getAttribute('data-id');
                 const id = idAttr != null ? Number(idAttr) : null;
                 const item = id != null ? _matches.find(m => m.id === id) : null;
                 if (!item) return;
-                // Toggle: if already confirmed, unconfirm; otherwise confirm.
+
                 if (item.user_status === 'confirmed') {
                     delete item.user_status;
                 } else {
                     item.user_status = 'confirmed';
                 }
+
                 if (_nmPath) await window.electronAPI.writeJsonFile(_nmPath, _matches);
                 lastScanResults = JSON.parse(JSON.stringify(_matches));
-                const ignoreBtn = card.querySelector('.ignore-btn');
-                if (item.user_status === 'confirmed') {
-                    card.style.opacity = '0.3';
-                    this.style.outline = '2px solid #4caf50';
-                    if (ignoreBtn) ignoreBtn.style.outline = 'none';
-                } else {
-                    card.style.opacity = '';
-                    this.style.outline = 'none';
+
+                // Find the helper functions in the enclosing scope by looking
+                // at the chapter wrapper's data attribute to find the right items.
+                if (!_updateCardButtonsRef || !_updateChapterButtonsRef) {
+                    // Fallback: manually update this card.
+                    const confirmBtn = card.querySelector('.confirm-btn');
+                    const ignoreBtn = card.querySelector('.ignore-btn');
+                    const isConfirmed = item.user_status === 'confirmed';
+                    const isIgnored = item.user_status === 'ignored';
+                    card.style.opacity = (isConfirmed || isIgnored) ? '0.3' : '';
+                    if (confirmBtn) {
+                        if (isConfirmed) {
+                            confirmBtn.textContent = 'Unconfirm';
+                            confirmBtn.style.display = '';
+                            confirmBtn.style.outline = '2px solid #4caf50';
+                        } else {
+                            confirmBtn.textContent = 'Confirm Link';
+                            confirmBtn.style.display = '';
+                            confirmBtn.style.outline = 'none';
+                        }
+                    }
+                    if (ignoreBtn) {
+                        if (isIgnored) {
+                            ignoreBtn.textContent = 'Unignore';
+                            ignoreBtn.style.display = '';
+                            ignoreBtn.style.outline = '2px solid #ff9800';
+                        } else {
+                            ignoreBtn.textContent = 'Ignore';
+                            ignoreBtn.style.display = isConfirmed ? 'none' : '';
+                            ignoreBtn.style.outline = 'none';
+                        }
+                    }
+                    // Try to update chapter buttons via the chapter label.
+                    if (chapterWrapper) {
+                        const chLabel = (chapterWrapper.querySelector('.group-header h3') || {}).textContent || '';
+                        const allWrappers = document.querySelectorAll('.chapter-wrapper');
+                        allWrappers.forEach(cw => {
+                            const hh = cw.querySelector('.group-header h3');
+                            if (hh && hh.textContent === chLabel) {
+                                const cards2 = cw.querySelectorAll('.footnote-card');
+                                let allConf = cards2.length > 0, allIgn = cards2.length > 0;
+                                cards2.forEach(c2 => {
+                                    const id2 = Number(c2.getAttribute('data-id'));
+                                    const it2 = id2 != null && !isNaN(id2) ? _matches.find(m => m.id === id2) : null;
+                                    if (!it2 || it2.user_status !== 'confirmed') allConf = false;
+                                    if (!it2 || it2.user_status !== 'ignored') allIgn = false;
+                                });
+                                const confBtn = cw.querySelector('.chapter-confirm-btn');
+                                const ignBtn = cw.querySelector('.chapter-ignore-btn');
+                                if (allConf) {
+                                    if (confBtn) { confBtn.textContent = 'Unconfirm Chapter'; confBtn.style.display = ''; }
+                                    if (ignBtn) ignBtn.style.display = 'none';
+                                } else if (allIgn) {
+                                    if (ignBtn) { ignBtn.textContent = 'Unignore Chapter'; ignBtn.style.display = ''; }
+                                    if (confBtn) confBtn.style.display = 'none';
+                                } else {
+                                    if (confBtn) { confBtn.textContent = 'Confirm Chapter'; confBtn.style.display = ''; }
+                                    if (ignBtn) { ignBtn.textContent = 'Ignore Chapter'; ignBtn.style.display = ''; }
+                                }
+                            }
+                        });
+                    }
                 }
             });
         });
@@ -891,26 +1028,78 @@ document.addEventListener('DOMContentLoaded', async function() {
             btn.addEventListener('click', async function() {
                 const card = this.closest('.footnote-card');
                 if (!card) return;
+                const chapterWrapper = card.closest('.chapter-wrapper');
                 const idAttr = card.getAttribute('data-id');
                 const id = idAttr != null ? Number(idAttr) : null;
                 const item = id != null ? _matches.find(m => m.id === id) : null;
                 if (!item) return;
-                // Toggle: if already ignored, unignore; otherwise ignore.
+
                 if (item.user_status === 'ignored') {
                     delete item.user_status;
                 } else {
                     item.user_status = 'ignored';
                 }
+
                 if (_nmPath) await window.electronAPI.writeJsonFile(_nmPath, _matches);
                 lastScanResults = JSON.parse(JSON.stringify(_matches));
+
+                // Fallback: manually update this card and chapter.
                 const confirmBtn = card.querySelector('.confirm-btn');
-                if (item.user_status === 'ignored') {
-                    card.style.opacity = '0.3';
-                    this.style.outline = '2px solid #ff9800';
-                    if (confirmBtn) confirmBtn.style.outline = 'none';
-                } else {
-                    card.style.opacity = '';
-                    this.style.outline = 'none';
+                const ignoreBtn2 = card.querySelector('.ignore-btn');
+                const isConfirmed = item.user_status === 'confirmed';
+                const isIgnored = item.user_status === 'ignored';
+                card.style.opacity = (isConfirmed || isIgnored) ? '0.3' : '';
+                if (confirmBtn) {
+                    if (isConfirmed) {
+                        confirmBtn.textContent = 'Unconfirm';
+                        confirmBtn.style.display = '';
+                        confirmBtn.style.outline = '2px solid #4caf50';
+                    } else {
+                        confirmBtn.textContent = 'Confirm Link';
+                        confirmBtn.style.display = isIgnored ? 'none' : '';
+                        confirmBtn.style.outline = 'none';
+                    }
+                }
+                if (ignoreBtn2) {
+                    if (isIgnored) {
+                        ignoreBtn2.textContent = 'Unignore';
+                        ignoreBtn2.style.display = '';
+                        ignoreBtn2.style.outline = '2px solid #ff9800';
+                    } else {
+                        ignoreBtn2.textContent = 'Ignore';
+                        ignoreBtn2.style.display = isConfirmed ? 'none' : '';
+                        ignoreBtn2.style.outline = 'none';
+                    }
+                }
+                // Update chapter buttons.
+                if (chapterWrapper) {
+                    const chLabel = (chapterWrapper.querySelector('.group-header h3') || {}).textContent || '';
+                    const allWrappers = document.querySelectorAll('.chapter-wrapper');
+                    allWrappers.forEach(cw => {
+                        const hh = cw.querySelector('.group-header h3');
+                        if (hh && hh.textContent === chLabel) {
+                            const cards2 = cw.querySelectorAll('.footnote-card');
+                            let allConf = cards2.length > 0, allIgn = cards2.length > 0;
+                            cards2.forEach(c2 => {
+                                const id2 = Number(c2.getAttribute('data-id'));
+                                const it2 = id2 != null && !isNaN(id2) ? _matches.find(m => m.id === id2) : null;
+                                if (!it2 || it2.user_status !== 'confirmed') allConf = false;
+                                if (!it2 || it2.user_status !== 'ignored') allIgn = false;
+                            });
+                            const confBtn = cw.querySelector('.chapter-confirm-btn');
+                            const ignBtn = cw.querySelector('.chapter-ignore-btn');
+                            if (allConf) {
+                                if (confBtn) { confBtn.textContent = 'Unconfirm Chapter'; confBtn.style.display = ''; }
+                                if (ignBtn) ignBtn.style.display = 'none';
+                            } else if (allIgn) {
+                                if (ignBtn) { ignBtn.textContent = 'Unignore Chapter'; ignBtn.style.display = ''; }
+                                if (confBtn) confBtn.style.display = 'none';
+                            } else {
+                                if (confBtn) { confBtn.textContent = 'Confirm Chapter'; confBtn.style.display = ''; }
+                                if (ignBtn) { ignBtn.textContent = 'Ignore Chapter'; ignBtn.style.display = ''; }
+                            }
+                        }
+                    });
                 }
             });
         });

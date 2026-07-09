@@ -632,6 +632,61 @@ def _repair_structural_parent_note_swaps(results: List[Dict[str, Any]]) -> None:
             child_row["match_method"] = "structural_child_swap"
 
 
+def _apply_series_prefix_labels(results: List[Dict[str, Any]]) -> None:
+    """When a chapter contains notes from multiple bidirectional conventions
+    (e.g. Author's Notes starting with "Note N" and editorial notes starting
+    with a plain number), suffix the chapter_label so the two note lists
+    appear separately in the UI instead of colliding on marker numbers.
+    """
+    if not results:
+        return
+
+    # Classify each result as author-note or editorial-note by its
+    # definition text.  Author's Notes consistently begin with "Note N".
+    _note_type_re = re.compile(r"^Note\s+\d{1,3}\b")
+    _chapter_types: Dict[Any, set] = defaultdict(set)
+    _row_types: Dict[int, str] = {}
+    for i, r in enumerate(results):
+        mk = (r.get("marker") or "").strip()
+        if not re.fullmatch(r"\d{1,3}", mk):
+            continue
+        defn = _safe_text(r.get("suggested_definition") or "")
+        prefix = "author" if _note_type_re.match(defn) else "editorial"
+        _row_types[i] = prefix
+        _chapter_types[r.get("chapter_group")].add(prefix)
+
+    # Only split when BOTH author and editorial notes exist in the same
+    # chapter AND their marker numbers overlap (causing UI collision).
+    _chapters_to_split = set()
+    for g, types in _chapter_types.items():
+        if len(types) < 2:
+            continue
+        _type_markers: Dict[str, set] = defaultdict(set)
+        for i, r in enumerate(results):
+            if r.get("chapter_group") == g and i in _row_types:
+                mk = (r.get("marker") or "").strip()
+                if mk:
+                    _type_markers[_row_types[i]].add(mk)
+        if _type_markers.get("author", set()) & _type_markers.get("editorial", set()):
+            _chapters_to_split.add(g)
+
+    if not _chapters_to_split:
+        return
+
+    _label_map = {"author": "Author's Note", "editorial": "Editorial Note"}
+    for i, prefix in _row_types.items():
+        r = results[i]
+        if r.get("chapter_group") not in _chapters_to_split:
+            continue
+        cur_label = _safe_text(r.get("chapter_label") or "")
+        cur_group = _safe_text(r.get("chapter_group") or "")
+        suffix = _label_map.get(prefix, prefix)
+        new_label = f"{cur_label} [{suffix}]" if cur_label else suffix
+        new_group = _chapter_group_key(new_label)
+        r["chapter_label"] = new_label
+        r["chapter_group"] = new_group
+
+
 # High-level function to scan a text blob for footnotes, supporting both inline and end-of-chapter/notes styles.
 def _scan_text_blob_for_footnotes(
     text: str,
@@ -1271,7 +1326,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     has_note_id = False
                     for sub in cur.find_all(True):
                         sid = (sub.get("id") or "").strip()
-                        if sid and (id_re.match(sid) or _pt4en_id_re.match(sid)):
+                        if sid and (id_re.match(sid) or _pt4en_id_re.match(sid) or _rref_id_re.match(sid) or _rss_id_re.match(sid)):
                             has_note_id = True
                             break
                     if has_note_id:
@@ -1433,7 +1488,13 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     cls = " ".join(tag.get("class") or []).lower()
                     parent = tag.find_parent(["p", "div", "li"])
                     parent_cls = " ".join(parent.get("class") or []).lower() if parent is not None else ""
-                    if _note_class_re.search(cls) or _note_class_re.search(parent_cls):
+                    is_note_like = (
+                        _note_class_re.search(cls)
+                        or _note_class_re.search(parent_cls)
+                        or "h1" in parent_cls
+                        or "noindent2" in parent_cls
+                    )
+                    if is_note_like:
                         matches_id = True
                 except Exception:
                     pass
@@ -4558,6 +4619,15 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                 li2 = bisect.bisect_right(line_starts, cand) - 1
                                 if 0 <= li2 < len(excluded) and excluded[li2]:
                                     continue
+                            # Numbered-list guard: skip "(N)" markers whose
+                            # first non-whitespace follower is an uppercase
+                            # letter — these are list items like "(2) B 4".
+                            after_pos = slice_start + m.end()
+                            if after_pos < len(anchors_text):
+                                tail = anchors_text[after_pos:after_pos + 30]
+                                m_tail = re.match(r"\s*[A-Z]", tail)
+                                if m_tail:
+                                    continue
                             return int(cand)
 
                         # Fallback: accept a unique bare "(n)" occurrence in the slice.
@@ -4571,6 +4641,13 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             if excluded is not None:
                                 li2 = bisect.bisect_right(line_starts, cand) - 1
                                 if 0 <= li2 < len(excluded) and excluded[li2]:
+                                    continue
+                            # Same numbered-list guard for bare "(n)".
+                            after_pos2 = slice_start + m2.end()
+                            if after_pos2 < len(anchors_text):
+                                tail2 = anchors_text[after_pos2:after_pos2 + 30]
+                                m_tail2 = re.match(r"\s*[A-Z]", tail2)
+                                if m_tail2:
                                     continue
                             fallback_hits.append(int(cand))
                             if len(fallback_hits) > 1:
@@ -5132,6 +5209,13 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
     _repair_structural_parent_note_swaps(all_results)
     _apply_marker_family_outlier_penalty(all_results)
+
+    # When a single chapter contains notes from multiple bidirectional
+    # conventions (e.g. "ref" for Author's Notes and "rref" for editorial
+    # notes), distinguish them with a prefix suffix so both lists appear
+    # separately in the UI instead of colliding on marker numbers.
+    _apply_series_prefix_labels(all_results)
+
     result_json = json.dumps(all_results, indent=2)
 
     # Restore the AI env var if we set it for this scan.
