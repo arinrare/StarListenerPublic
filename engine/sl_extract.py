@@ -877,7 +877,13 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
                 if not re.match(r"^\s*(?:p|pp)\.?\s*\d{1,3}\s*\)?\s*$", _txt_rss, re.IGNORECASE):
                     continue
             elif not is_noteref(a) and not _is_superscript_related(a):
-                continue
+                # Symbol markers (*, dagger, double-dagger, section) in
+                # running-text <a> tags are common bidirectional footnote
+                # markers in scholarly EPUBs. Accept them even without
+                # superscript or noteref classes.
+                link_text = _safe_text(a.get_text(" ")).strip()
+                if not link_text or not re.fullmatch(r"[\*\u2020\u2021\u00a7]+", link_text, re.UNICODE):
+                    continue
 
         # Track whether the href fragment matches a recognised footnote-ID
         # naming scheme (fn, ref, note, rfn, st/rst, pt4en, etc.). Anchors with

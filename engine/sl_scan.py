@@ -1104,6 +1104,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
     except Exception:
         structured_footnote_epub = False
         _st_rst_convention = False
+        referenced_def_ids = set()
 
     # When a structured footnote convention is detected, the EPUB is well-structured —
     # all real footnotes have explicit HTML links. Disable ALL AI calls globally
@@ -1291,6 +1292,26 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         except Exception:
             start = None
         if start is None:
+            # When the structured footnote convention is active, definition
+            # targets may live inside <ul>/<ol> as empty <a> anchors between
+            # <li> elements (common in scholarly EPUBs).  Find the nearest
+            # <li> sibling and use its text as the definition.
+            # Only applies to non-<li> children -- <li> elements themselves
+            # contain their own definition text handled by the caller.
+            if structured_footnote_epub and hasattr(tag, "find_parent") and getattr(tag, "name", "") != "li":
+                try:
+                    list_parent = tag.find_parent(["ul", "ol"])
+                    if list_parent is not None:
+                        sibling = tag.find_previous_sibling("li") or tag.find_next_sibling("li")
+                        if sibling is not None:
+                            txt = _safe_text(sibling.get_text(" "))
+                            if txt:
+                                m = _def_line_regex().match(txt)
+                                if m:
+                                    return _safe_text(m.group(2))
+                                return txt
+                except Exception:
+                    pass
             return None
 
         def _normalize_block_text(node: Any) -> str:
