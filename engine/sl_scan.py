@@ -3019,6 +3019,14 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         if _def_starts:
             filtered: List[Dict[str, Any]] = []
             for a in deduped:
+                # Keep anchors whose href points to a different spine file
+                # (cross-file bidirectional markers, e.g. commentary dagger
+                # links) — these are never definition headers.
+                # Intra-file href anchors (same-file #fn style) are not
+                # exempted; they can still be definition headers.
+                if a.get("href") and "#" in str(a.get("href")) and "index_split_" in str(a.get("href")):
+                    filtered.append(a)
+                    continue
                 ctx = (a.get("context") or "").strip()
                 mk_raw = (a.get("marker_raw") or "").strip()
                 if not mk_raw:
