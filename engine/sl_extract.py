@@ -971,7 +971,13 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
                     _page_ref_extracted = True
 
         # Only accept small marker-like texts.
-        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3}", marker_txt or ""):
+        # Use Unicode symbol patterns (dagger, double-dagger, section) only
+        # when the href fragment looks like a filepos id — real footnote
+        # definition targets. Otherwise mojibake never matches real daggers,
+        # preventing typographic bullets from being treated as footnotes.
+        _is_filepos_frag = bool(frag and re.match(r"^filepos\d+$", frag))
+        _sym_pattern = r"|\u2020+|\u2021+|\u00a7+" if _is_filepos_frag else r"|ΓÇá+|ΓÇí+|┬º+"
+        if not re.fullmatch(r"\d{1,3}|\*+" + _sym_pattern + r"|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3}", marker_txt or ""):
             continue
 
         marker_norm = _normalize_marker(marker_txt)
@@ -1137,7 +1143,7 @@ def _harvest_specific_filepos_note_targets(soup: BeautifulSoup) -> Tuple[Dict[st
         if not a:
             continue
         mk_raw = _safe_text(a.get_text(" "))
-        if not re.fullmatch(r"\d{1,3}|\*+|ΓÇá+|ΓÇí+|┬º+|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3}", mk_raw or ""):
+        if not re.fullmatch(r"\d{1,3}|\*+|\u2020+|\u2021+|\u00a7+|[a-zA-Z]|[a-zA-Z]{1,4}\d{1,3}", mk_raw or ""):
             continue
 
         # Get full paragraph text and strip the marker prefix.
