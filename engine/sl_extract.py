@@ -1171,6 +1171,16 @@ def _harvest_specific_filepos_note_targets(soup: BeautifulSoup) -> Tuple[Dict[st
                     if not prev_txt:
                         bound_id = str(pid)
 
+            # Case 3: filepos id on a descendant element within <p>.
+            # Some EPUBs place the id on an inner tag (e.g. <small>)
+            # rather than on the paragraph itself.
+            if not bound_id:
+                for tag in p.find_all(True):
+                    tid = tag.get("id")
+                    if tid and str(tid).lower().startswith("filepos"):
+                        bound_id = str(tid)
+                        break
+
         if bound_id:
             id_map[bound_id] = def_text
             marker_defs.append({"marker": marker_norm, "text": def_text})
