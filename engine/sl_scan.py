@@ -4297,6 +4297,14 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 mk = _safe_text(d.get("marker") or "").strip()
                 if not txt or not mk:
                     continue
+                # In bidirectional EPUBs, pure-numeric orphan definitions from
+                # text parsing are usually false positives (poem line numbers,
+                # page references) rather than real footnotes. Real numeric
+                # notes are already paired via HTML links.
+                # Only suppress when structured note harvesting found nothing
+                # for this item -- if it did, the orphans are trustworthy.
+                if structured_footnote_epub and not structured_note_defs and re.fullmatch(r"\d{1,3}", mk):
+                    continue
                 # Skip definitions that belong to a different chapter.
                 # This prevents cross-chapter leakage of orphan definitions
                 # from global harvesting or spillover (e.g. Chapter VI notes
