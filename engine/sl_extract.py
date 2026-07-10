@@ -1142,7 +1142,7 @@ def _harvest_specific_filepos_note_targets(soup: BeautifulSoup) -> Tuple[Dict[st
 
         # Get full paragraph text and strip the marker prefix.
         p_text = _safe_text(p.get_text(" "))
-        if not p_text or len(p_text) < 20:
+        if not p_text:
             continue
 
         m = _def_line_regex().match(p_text)
@@ -1180,6 +1180,12 @@ def _harvest_specific_filepos_note_targets(soup: BeautifulSoup) -> Tuple[Dict[st
                     if tid and str(tid).lower().startswith("filepos"):
                         bound_id = str(tid)
                         break
+
+        # Reject short paragraphs only when they are not bound to a
+        # filepos id — a filepos binding is proof this is a real
+        # footnote definition regardless of text length.
+        if len(p_text) < 20 and not bound_id:
+            continue
 
         if bound_id:
             id_map[bound_id] = def_text
