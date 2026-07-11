@@ -56,6 +56,7 @@ def _safe_book_label(name: str) -> str:
         else:
             cleaned.append("_")
     label = "".join(cleaned).strip().replace(" ", "_")
+    label = re.sub(r"_{2,}", "_", label)
     return label or "scan"
 
 

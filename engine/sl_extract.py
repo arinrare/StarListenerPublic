@@ -708,6 +708,7 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         re.IGNORECASE,
     )
     _pt4en_id_re = re.compile(r"^r?pt4en\d{1,4}[a-z]?$", re.IGNORECASE)
+    _note_ctx_re = re.compile(r"\b(?:note|endnote|footnote)", re.IGNORECASE)
 
     def is_noteref(a_tag) -> bool:
         # EPUBs often mark footnote refs via epub:type="noteref" or classes like "noteref".
@@ -850,13 +851,20 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         href = a.get("href")
         if not href:
             continue
-        # Allow intra-file (#fn1) and cross-file (notes.xhtml#fn1) fragments.
-        if "#" not in href:
-            continue
         if href.lower().startswith("http://") or href.lower().startswith("https://"):
             continue
 
         frag = href_fragment(href)
+        _has_href_fragment = "#" in href
+
+        # When an <a> tag links to a separate file without a #fragment,
+        # try using the anchor's own id as a synthetic fragment for pairing.
+        # This handles cross-file footnote links (e.g. href="footnote1.html" id="footnote1")
+        # where the anchor and the definition element share the same id.
+        if not _has_href_fragment:
+            _anchor_id = (_safe_text(a.get("id") or "").strip())
+            if _anchor_id and id_re.match(_anchor_id):
+                frag = _anchor_id
         # Also recognise the st{N}/rst{N} footnote convention where anchors
         # in prose link to rst-prefixed or st-prefixed definition ids.
         # Direction 1 (Book 11): anchor=st{N}, fragment=rst{N}
@@ -871,6 +879,25 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         _frag_matches = bool(
             frag and (id_re.match(frag) or _is_rst_frag or _is_st_frag or _pt4en_id_re.match(frag))
         )
+        # Also accept fragments that point to a real DOM element inside a
+        # note-like container. This handles naming conventions not covered
+        # by the id_re pattern while avoiding false positives from
+        # cross-references, chapter headings, and index targets.
+        if not _frag_matches and frag:
+            try:
+                target = soup.find(id=frag)
+                if target is not None:
+                    target_cls = " ".join(target.get("class") or []).lower()
+                    if _note_ctx_re.search(target_cls):
+                        _frag_matches = True
+                    else:
+                        for ancestor in target.find_parents(["span", "p", "div", "li", "ul", "ol", "section"]):
+                            anc_cls = " ".join(ancestor.get("class") or []).lower()
+                            if _note_ctx_re.search(anc_cls):
+                                _frag_matches = True
+                                break
+            except Exception:
+                pass
         if not _frag_matches:
             if _is_rss_frag:
                 _txt_rss = _safe_text(a.get_text(" "))
@@ -893,6 +920,21 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         _frag_is_footnote_id = bool(
             frag and (id_re.match(frag) or _is_rst_frag or _is_st_frag or _is_rss_frag or _pt4en_id_re.match(frag))
         )
+        if not _frag_is_footnote_id and frag:
+            try:
+                target = soup.find(id=frag)
+                if target is not None:
+                    target_cls = " ".join(target.get("class") or []).lower()
+                    if _note_ctx_re.search(target_cls):
+                        _frag_is_footnote_id = True
+                    else:
+                        for ancestor in target.find_parents(["span", "p", "div", "li", "ul", "ol", "section"]):
+                            anc_cls = " ".join(ancestor.get("class") or []).lower()
+                            if _note_ctx_re.search(anc_cls):
+                                _frag_is_footnote_id = True
+                                break
+            except Exception:
+                pass
 
         txt = _safe_text(a.get_text(" "))
         marker_txt = txt
@@ -1056,6 +1098,8 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
                 "context": parent_text[:400],
                 "href": href,
                 "_has_href": True,
+                "_frag": frag,
+                "_page_ref_extracted": _page_ref_extracted,
             }
         )
 
@@ -1097,17 +1141,35 @@ def _extract_anchors_from_soup(soup: BeautifulSoup) -> List[Dict[str, Any]]:
                 "position": -1,
                 "context": parent_text[:400],
                 "_has_href": False,
+                "_page_ref_extracted": False,
             }
         )
 
-    # De-dup by (marker, context)
-    seen = set()
+    # De-dup by (marker, context). When two anchors share the same
+    # marker and context but one is a page-ref-extracted inline
+    # reference (e.g. "(Note 7, p. 408)") and the other is a direct
+    # superscript marker, AND they point to different definitions,
+    # keep both — they are distinct annotations in different chapters.
+    seen: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    seen_resolved: set = set()
     uniq: List[Dict[str, Any]] = []
     for a in anchors:
         key = (a.get("marker"), a.get("context"))
-        if key in seen:
+        if key in seen_resolved:
             continue
-        seen.add(key)
+        if key in seen:
+            existing = seen[key]
+            only_one_is_page_ref = (
+                bool(existing.get("_page_ref_extracted")) != bool(a.get("_page_ref_extracted"))
+            )
+            hrefs_differ = (
+                (existing.get("href") or "") != (a.get("href") or "")
+            )
+            if only_one_is_page_ref and hrefs_differ:
+                seen_resolved.add(key)
+                uniq.append(a)
+            continue
+        seen[key] = a
         uniq.append(a)
     return uniq
 
@@ -1289,6 +1351,22 @@ def _harvest_structured_notes_section_targets(soup: BeautifulSoup) -> Tuple[Dict
         tag_id = _safe_text(getattr(tag, "get", lambda _k, _d=None: None)("id") or "").strip()
         if not tag_id and first_anchor is not None:
             tag_id = _safe_text(first_anchor.get("id") or "").strip()
+        # Walk up to ancestor elements (span, li, p, div) to find an id
+        # that may hold the definition identifier.
+        if not tag_id:
+            try:
+                for ancestor in getattr(tag, "parents", []):
+                    if ancestor is None:
+                        continue
+                    anc_name = str(getattr(ancestor, "name", "") or "").lower()
+                    if anc_name not in {"span", "li", "p", "div", "td", "th", "dd", "dt", "a"}:
+                        continue
+                    anc_id = _safe_text(getattr(ancestor, "get", lambda _k, _d=None: None)("id") or "").strip()
+                    if anc_id:
+                        tag_id = anc_id
+                        break
+            except Exception:
+                pass
         return {"id": tag_id, "marker": marker_norm, "text": body, "tag_name": tag_name}
 
     def _candidate_blocks_from_node(node: Any) -> List[Any]:
@@ -2722,9 +2800,11 @@ def _pair_anchors_to_definitions(
 
         # 0) If the EPUB provides a fragment id, use it (highest confidence)
         href = a.get("href")
-        if definitions_by_id and href and "#" in href:
-            frag = href.split("#", 1)[1]
-            frag = (frag or "").strip()
+        if definitions_by_id:
+            frag = a.get("_frag")
+            if not frag and href and "#" in href:
+                frag = href.split("#", 1)[1]
+            frag = (_safe_text(str(frag or ""))).strip()
             if frag:
                 def_text = definitions_by_id.get(frag)
                 if def_text:
