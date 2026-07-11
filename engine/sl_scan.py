@@ -1519,6 +1519,17 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         matches_id = True
                 except Exception:
                     pass
+            # When a structured footnote convention is active, also harvest
+            # definitions for element IDs that the pre-scan identified as
+            # bidirectional footnote targets but which match none of the
+            # known naming patterns (fn, rfn, rref, rss, etc.).  Only harvest
+            # empty <a> tags — these are landing targets in list-based note
+            # structures (e.g. <a id="filepos66316"> between <li> elements),
+            # never definition containers themselves.
+            if not matches_id and structured_footnote_epub and tag_id in referenced_def_ids:
+                known_pattern = bool(id_re.match(tag_id) or _pt4en_id_re.match(tag_id) or _rref_id_re.match(tag_id) or _rss_id_re.match(tag_id))
+                if not known_pattern and tag.name == "a" and not _safe_text(tag.get_text(" ")).strip():
+                    matches_id = True
             if not matches_id:
                 continue
 
