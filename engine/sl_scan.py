@@ -1323,7 +1323,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
         def _note_block_style(text: str) -> str:
             t = (text or "").lstrip()
-            if re.match(r"^\d{1,3}\s*[\]\)\.:\-—]\s+", t):
+            if re.match(r"^\d{1,3}(?:\s*[\]\)\.:\-—]\s+|\s+)", t):
                 return "num_plain"
             if re.match(r"^[\(\[]\s*\d{1,3}\s*[\)\]]\s*[\]\)\.:\-—]?\s+", t):
                 return "num_wrapped"
@@ -1530,6 +1530,19 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 known_pattern = bool(id_re.match(tag_id) or _pt4en_id_re.match(tag_id) or _rref_id_re.match(tag_id) or _rss_id_re.match(tag_id))
                 if not known_pattern and tag.name == "a" and not _safe_text(tag.get_text(" ")).strip():
                     matches_id = True
+            if not matches_id:
+                # Check if the element is inside a notes list (ul/ol
+                # immediately following a NOTES header). This catches
+                # definition ids inside structured notes sections that
+                # use list markup instead of per-paragraph ids.
+                try:
+                    for ancestor in tag.find_parents(["ul", "ol"]):
+                        prev = ancestor.find_previous_sibling()
+                        if prev is not None and _is_notes_header_line(_safe_text(prev.get_text(" "))):
+                            matches_id = True
+                            break
+                except Exception:
+                    pass
             if not matches_id:
                 continue
 

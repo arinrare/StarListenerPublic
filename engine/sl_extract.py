@@ -1351,8 +1351,25 @@ def _harvest_structured_notes_section_targets(soup: BeautifulSoup) -> Tuple[Dict
         tag_id = _safe_text(getattr(tag, "get", lambda _k, _d=None: None)("id") or "").strip()
         if not tag_id and first_anchor is not None:
             tag_id = _safe_text(first_anchor.get("id") or "").strip()
-        # Walk up to ancestor elements (span, li, p, div) to find an id
-        # that may hold the definition identifier.
+        # Walk between anchor and tag to find an id on a wrapping
+        # element (e.g. <li><span id="ch1fn01"><a>1</a></span>).
+        # Skip for list containers (ul, ol) — any id found there
+        # belongs to a child element, not the container itself.
+        # The notes-list harvesting path handles those separately.
+        if not tag_id and first_anchor is not None and tag_name not in {"ul", "ol"}:
+            try:
+                for ancestor in getattr(first_anchor, "parents", []):
+                    if ancestor is None or ancestor is tag:
+                        break
+                    anc_name = str(getattr(ancestor, "name", "") or "").lower()
+                    if anc_name not in {"span", "li", "p", "div", "td", "th", "dd", "dt", "a"}:
+                        continue
+                    anc_id = _safe_text(getattr(ancestor, "get", lambda _k, _d=None: None)("id") or "").strip()
+                    if anc_id:
+                        tag_id = anc_id
+                        break
+            except Exception:
+                pass
         if not tag_id:
             try:
                 for ancestor in getattr(tag, "parents", []):

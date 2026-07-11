@@ -707,9 +707,11 @@ def _label_is_plausible_chapter_label(label: Optional[str]) -> bool:
     if re.match(r"^\s*\d{1,3}\.\s+[a-z]", t):
         return False
 
-    # Glossary/definition-y punctuation and editor references.
+    # Colon in a label is usually a glossary/definition marker, but
+    # TOC-style labels like "I: Chapter Title" are real headings.
     if ":" in t or ";" in t or "$" in t:
-        return False
+        if not re.match(r"^\s*([IVXLC]{1,12}|\d{1,3}):\s", t):
+            return False
     if re.search(r"\bsee\b", t, re.IGNORECASE):
         return False
 
