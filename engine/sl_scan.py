@@ -4311,7 +4311,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 # notes are already paired via HTML links.
                 # Only suppress when structured note harvesting found nothing
                 # for this item -- if it did, the orphans are trustworthy.
-                if structured_footnote_epub and not structured_note_defs and re.fullmatch(r"\d{1,3}", mk):
+                if structured_footnote_epub and not structured_note_id_map and re.fullmatch(r"\d{1,3}", mk):
                     continue
                 # Skip definitions that belong to a different chapter.
                 # This prevents cross-chapter leakage of orphan definitions
