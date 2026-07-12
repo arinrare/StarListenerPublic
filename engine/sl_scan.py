@@ -1015,10 +1015,11 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
     st_rst_global_defs: Dict[str, Dict[str, Any]] = {}  # rst-id -> full definition info
     _st_id_re = re.compile(r"^st(\d+)([a-z]?)$", re.IGNORECASE)
     _rst_id_re = re.compile(r"^rst(\d+)([a-z]?)$", re.IGNORECASE)
+    id_to_item_index: Dict[str, int] = {}
     try:
         # --- Phase 1: Collect all element IDs across the entire EPUB ---
         all_elem_ids: set[str] = set()
-        for it in items:
+        for item_idx, it in enumerate(items):
             try:
                 html_content = it.get_content()
                 html_text = html_content.decode("utf-8", errors="ignore") if isinstance(html_content, bytes) else str(html_content)
@@ -1027,6 +1028,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     tid = _safe_text(tag.get("id") or "").strip()
                     if tid:
                         all_elem_ids.add(tid)
+                        id_to_item_index.setdefault(tid, int(item_idx))
             except Exception:
                 continue
 
@@ -1037,6 +1039,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         total_bidi_anchors = 0
         total_bidi_defs = 0
         referenced_def_ids: set[str] = set()
+        footnote_fragment_ids: set[str] = set()
         anchor_files_with_bidi: set[int] = set()
         _small_marker_re = re.compile(r"^\s*[\(\[]?\s*(?:\d{1,3}|\*+|\u2020+|\u2021+|\u00a7+|[a-zA-Z]{1,4}\d{1,3}|[a-zA-Z])\s*[\)\]]?\s*$", re.UNICODE)
 
@@ -1062,6 +1065,21 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     total_bidi_anchors += 1
                     referenced_def_ids.add(frag)
                     anchor_files_with_bidi.add(int(idx))
+
+                # Collect high-quality fragment IDs from anchors that pass the
+                # full footnote-anchor detector.  These are used later by the
+                # gap filler to harvest definitions that were missed by the
+                # primary pattern-based ID matching.
+                try:
+                    extracted = _extract_anchors_from_soup(probe_soup)
+                    for a in extracted:
+                        href_ext = _safe_text(a.get("href") or "").strip()
+                        if "#" in href_ext:
+                            frag_ext = href_ext.rsplit("#", 1)[1].strip()
+                            if frag_ext:
+                                footnote_fragment_ids.add(frag_ext)
+                except Exception:
+                    pass
 
                 # Count st{N}/rst{N} anchors (for the narrow st/rst harvest path).
                 for a in probe_soup.find_all("a"):
@@ -1105,6 +1123,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         structured_footnote_epub = False
         _st_rst_convention = False
         referenced_def_ids = set()
+        footnote_fragment_ids = set()
 
     # When a structured footnote convention is detected, the EPUB is well-structured —
     # all real footnotes have explicit HTML links. Disable ALL AI calls globally
@@ -1272,6 +1291,11 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
     # Build a global id->definition map (common in EPUBs where notes live in separate files).
     global_defs_by_id: Dict[str, str] = {}
+    # Fallback definitions for non-standard footnote fragment IDs that the primary
+    # pattern-based harvester misses (e.g. inline endnotes like c3_rfn1).  These are
+    # applied in post-processing only to anchors that would otherwise be unpaired, so
+    # they never override existing marker/id_link matches in already-working books.
+    gap_fill_defs_by_id: Dict[str, str] = {}
     global_defs_by_marker: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     # Common fragment/id naming schemes for note targets.
     # This is used for harvesting *definitions* and for identifying note-target pages.
@@ -1847,6 +1871,85 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                 "parent_chapter_group": _parent_structural_chapter_group(ent_label),
                             }
                         )
+
+    # Collect fallback definitions for non-standard footnote fragment IDs that the
+    # primary pattern-based harvester missed (e.g. inline endnotes like c3_rfn1).
+    # These are NOT added to global_defs_by_id; they are applied later in
+    # post-processing only to anchors that would otherwise remain unpaired.  This
+    # prevents the fallback from changing existing marker/id_link matches in
+    # already-working books.
+    missing_ids = footnote_fragment_ids - set(global_defs_by_id.keys())
+    if missing_ids:
+
+        def _is_standard_note_id(mid: str) -> bool:
+            if id_re.match(mid):
+                return True
+            if _pt4en_id_re.match(mid):
+                return True
+            if _rref_id_re.match(mid):
+                return True
+            if _rss_id_re.match(mid):
+                return True
+            if re.match(r"^rst\d+[a-z]?$", mid, re.IGNORECASE):
+                return True
+            if re.match(r"^st\d+[a-z]?$", mid, re.IGNORECASE):
+                return True
+            return False
+
+        def _has_note_class_context(tag: Any) -> bool:
+            try:
+                cls = " ".join(tag.get("class") or []).lower()
+                if _note_class_re.search(cls):
+                    return True
+                for ancestor in tag.find_parents(["span", "p", "div", "li", "ul", "ol", "section"]):
+                    anc_cls = " ".join(ancestor.get("class") or []).lower()
+                    if _note_class_re.search(anc_cls):
+                        return True
+            except Exception:
+                pass
+            return False
+
+        id_by_item: Dict[int, List[str]] = defaultdict(list)
+        for mid in missing_ids:
+            if _is_standard_note_id(mid):
+                continue
+            idx = id_to_item_index.get(mid)
+            if idx is not None:
+                id_by_item[int(idx)].append(mid)
+
+        for item_idx, mids in id_by_item.items():
+            try:
+                html_content = items[item_idx].get_content()
+                html_text = html_content.decode("utf-8", errors="ignore") if isinstance(html_content, bytes) else str(html_content)
+                soup = BeautifulSoup(html_text, "html.parser")
+                for mid in mids:
+                    tag = soup.find(id=mid)
+                    if tag is None:
+                        continue
+                    harvested = _harvest_id_note_block(tag)
+                    if not harvested:
+                        # Only fall back to raw block text when the element is in a
+                        # note-related container.  This avoids harvesting cross-reference
+                        # paragraphs that happen to have non-standard IDs.
+                        if getattr(tag, "name", "") in ("p", "blockquote", "li", "div") and _has_note_class_context(tag):
+                            harvested = _safe_text(tag.get_text(" "))
+                        if not harvested:
+                            continue
+                    m = _def_line_regex().match(harvested)
+                    if not m:
+                        continue
+                    marker = _safe_text(m.group(1) or "").strip()
+                    # Restrict fallback harvesting to numeric markers.  Symbol markers
+                    # (e.g. '*') in scholarly EPUBs are already handled by marker-based
+                    # pairing; gap-filling them would change existing matches.
+                    if not re.fullmatch(r"\d{1,3}", marker):
+                        continue
+                    body = _safe_text(m.group(2) or "").strip()
+                    if len(body) < 10:
+                        continue
+                    gap_fill_defs_by_id.setdefault(mid, harvested)
+            except Exception:
+                continue
 
     current_chapter_label: Optional[str] = None
     current_chapter_group: Optional[str] = None
@@ -4794,23 +4897,92 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         except Exception:
             pass
 
+        # Rescue anchors that point to fallback-harvested definitions.  These are
+        # non-standard inline endnotes (e.g. c3_rfn1) that the primary harvester
+        # missed; promote them to id_link so they survive the structured filter.
+        try:
+            if gap_fill_defs_by_id and results:
+                for r in results:
+                    if r.get("match_method") != "none":
+                        continue
+                    href = r.get("href")
+                    if not href or not isinstance(href, str) or "#" not in href:
+                        continue
+                    frag = href.split("#", 1)[1].strip()
+                    if not frag:
+                        continue
+                    def_text = gap_fill_defs_by_id.get(frag)
+                    if not def_text:
+                        continue
+                    r["suggested_definition"] = def_text
+                    r["confidence"] = "High (ID Link)"
+                    r["confidence_score"] = 0.98
+                    r["match_method"] = "id_link"
+        except Exception:
+            pass
+
         # Final cleanup: if an orphan_definition exists for a marker that also has a
-        # non-orphan entry in the same chapter_group, drop the orphan. This prevents
-        # duplicated marker entries in the UI.
+        # non-orphan entry in the same chapter_group, drop the orphan.  Also merge
+        # orphan chapter labels into id_link rows when the chapter_group differs but
+        # they share the same spine item and marker (common for inline endnotes where
+        # heading reassignment placed the id_link row in the wrong chapter group).
         try:
             if results:
                 non_orphan_keys: set[Tuple[Optional[str], str]] = set()
+                id_link_keys_by_index: set[Tuple[Optional[Any], str]] = set()
                 for r in results:
-                    if r.get("match_method") == "orphan_definition":
-                        continue
                     mk = str(r.get("marker") or "").strip()
                     if not mk:
                         continue
-                    g = r.get("chapter_group")
-                    gkey = str(g) if g is not None else None
-                    non_orphan_keys.add((gkey, mk))
+                    if r.get("match_method") != "orphan_definition":
+                        g = r.get("chapter_group")
+                        gkey = str(g) if g is not None else None
+                        non_orphan_keys.add((gkey, mk))
+                    if r.get("match_method") == "id_link":
+                        id_link_keys_by_index.add((r.get("chapter_index"), mk))
 
-                if non_orphan_keys:
+                # Merge orphan chapter labels into id_link rows before dropping orphans.
+                if id_link_keys_by_index:
+                    orphan_by_key: Dict[Tuple[Optional[Any], str], Dict[str, Any]] = {}
+                    for r in results:
+                        if r.get("match_method") != "orphan_definition":
+                            continue
+                        mk = str(r.get("marker") or "").strip()
+                        if not mk:
+                            continue
+                        key = (r.get("chapter_index"), mk)
+                        if key in id_link_keys_by_index and key not in orphan_by_key:
+                            orphan_by_key[key] = r
+                    for r in results:
+                        if r.get("match_method") != "id_link":
+                            continue
+                        mk = str(r.get("marker") or "").strip()
+                        if not mk:
+                            continue
+                        key = (r.get("chapter_index"), mk)
+                        orphan = orphan_by_key.get(key)
+                        if orphan is None:
+                            continue
+                        orphan_label = orphan.get("chapter_label")
+                        # Only adopt the orphan's label when the id_link row inherited a
+                        # stale label from the previous spine item.  This fixes inline
+                        # endnotes whose anchor was mis-assigned to the preceding chapter
+                        # while avoiding chapter-label churn in books where the position-
+                        # based assignment is already correct.
+                        id_link_label = r.get("chapter_label")
+                        if orphan_label and id_link_label == prev_chapter_label:
+                            r["chapter_label"] = orphan_label
+                            r["chapter_group"] = orphan.get("chapter_group") or _chapter_group_key(orphan_label)
+                            try:
+                                base = 0
+                                if r.get("source") == "epub" and isinstance(r.get("chapter_index"), int):
+                                    base = int(r["chapter_index"])
+                                pos_i = int(r.get("position")) if isinstance(r.get("position"), int) and r.get("position") >= 0 else 999_999_999
+                                r["order_key"] = base * 1_000_000_000 + min(pos_i, 999_999_999)
+                            except Exception:
+                                pass
+
+                if non_orphan_keys or id_link_keys_by_index:
                     filtered: List[Dict[str, Any]] = []
                     for r in results:
                         if r.get("match_method") != "orphan_definition":
@@ -4820,6 +4992,9 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         g = r.get("chapter_group")
                         gkey = str(g) if g is not None else None
                         if (gkey, mk) in non_orphan_keys:
+                            continue
+                        idx_key = (r.get("chapter_index"), mk)
+                        if idx_key in id_link_keys_by_index:
                             continue
                         filtered.append(r)
                     results = filtered
