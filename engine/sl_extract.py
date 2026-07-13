@@ -1281,11 +1281,55 @@ def _harvest_structured_notes_section_targets(soup: BeautifulSoup) -> Tuple[Dict
     boundary_tag_names = {"h1", "h2", "h3", "h4", "h5", "h6", "title"}
     scanned_ids: set[int] = set()
 
+    # Class/name tokens that indicate a block is a continuation of the preceding
+    # note/footnote definition rather than a new paragraph or note.
+    _note_continuation_cls_tokens = (
+        "note-ext", "noteext", "note-body", "notebody",
+        "footnote-text", "footnotetext", "fn-ext", "fnext",
+        "note-cont", "notecont", "footnote-cont", "footnotecont",
+    )
+    _note_continuation_tag_names = {"p", "div", "blockquote", "li", "dd", "dt"}
+
     def _block_text(tag: Any) -> str:
         try:
             return _safe_text(tag.get_text(" "))
         except Exception:
             return ""
+
+    def _looks_like_note_continuation(tag: Any) -> bool:
+        """True when tag is structurally a continuation of a note definition."""
+        tag_name = str(getattr(tag, "name", "") or "").lower()
+        if tag_name not in _note_continuation_tag_names:
+            return False
+        cls = " ".join(getattr(tag, "get", lambda _k, _d=None: None)("class") or []).lower()
+        if any(tok in cls for tok in _note_continuation_cls_tokens):
+            return True
+        # Also treat a bare <div> with no text as a spacer we can step over.
+        if tag_name == "div" and not _block_text(tag).strip():
+            return True
+        return False
+
+    def _is_new_note_block(tag: Any) -> bool:
+        """True when tag starts a new note definition (not a continuation)."""
+        tag_name = str(getattr(tag, "name", "") or "").lower()
+        if tag_name not in _note_continuation_tag_names:
+            return False
+        # Has an id that looks like a footnote target.
+        tid = _safe_text(getattr(tag, "get", lambda _k, _d=None: None)("id") or "").strip()
+        if tid:
+            if "_rfn" in tid:
+                return True
+            if re.match(r"^(?:fn|note|endnote|en|ref|n)[-_]?\d{1,4}", tid, re.IGNORECASE):
+                return True
+        # Contains a child with such an id.
+        try:
+            for sub in tag.find_all(True):
+                sid = _safe_text(getattr(sub, "get", lambda _k, _d=None: None)("id") or "").strip()
+                if sid and ("_rfn" in sid or re.match(r"^(?:fn|note|endnote|en|ref|n)[-_]?\d{1,4}", sid, re.IGNORECASE)):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _extract_structured_note_from_block(tag: Any) -> Optional[Dict[str, str]]:
         text = _block_text(tag)
@@ -1415,16 +1459,43 @@ def _harvest_structured_notes_section_targets(soup: BeautifulSoup) -> Tuple[Dict
         note_entry = _extract_structured_note_from_block(tag)
         if note_entry is None:
             continue
+
+        # Collect continuation blocks (e.g. <p class="note-ext">) that belong to
+        # this note but are split into separate HTML elements.
+        body = note_entry["text"]
+        try:
+            cur = tag.find_next_sibling()
+            while cur is not None:
+                cur_name = str(getattr(cur, "name", "") or "").lower()
+                if cur_name in boundary_tag_names:
+                    break
+                if _is_new_note_block(cur):
+                    break
+                if _looks_like_note_continuation(cur):
+                    ct = _block_text(cur).strip()
+                    if ct:
+                        body = (body + "\n\n" + ct) if body else ct
+                    cur = cur.find_next_sibling()
+                    continue
+                # Allow stepping over empty spacer divs, but stop at any other
+                # block that isn't recognised as a continuation.
+                if cur_name == "div" and not _block_text(cur).strip():
+                    cur = cur.find_next_sibling()
+                    continue
+                break
+        except Exception:
+            pass
+
         marker_defs.append(
             {
                 "id": note_entry["id"],
                 "marker": note_entry["marker"],
-                "text": note_entry["text"],
+                "text": body,
                 "line_index": len(marker_defs) + 1,
             }
         )
         if note_entry["id"]:
-            id_map[note_entry["id"]] = note_entry["text"]
+            id_map[note_entry["id"]] = body
         scanned_ids.add(id(tag))
 
     if marker_defs:

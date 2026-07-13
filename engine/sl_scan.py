@@ -1944,10 +1944,15 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     # pairing; gap-filling them would change existing matches.
                     if not re.fullmatch(r"\d{1,3}", marker):
                         continue
-                    body = _safe_text(m.group(2) or "").strip()
+                    # Preserve continuation paragraphs: remove only the marker prefix
+                    # from the first line, not everything after it.
+                    lead_re = re.compile(
+                        rf"^\s*(?:\(|\[)?\s*{re.escape(marker)}\s*(?:\]|\))?\s*(?:[\]\)\.:\-—]\s*)?"
+                    )
+                    body = lead_re.sub("", harvested, count=1).strip()
                     if len(body) < 10:
                         continue
-                    gap_fill_defs_by_id.setdefault(mid, harvested)
+                    gap_fill_defs_by_id.setdefault(mid, body)
             except Exception:
                 continue
 

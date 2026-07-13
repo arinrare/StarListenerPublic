@@ -473,7 +473,10 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (item.suggested_definition) {
                 const chKey = item.chapter_group || item.chapter_label || '';
                 if (!seenDefsByChapter[chKey]) seenDefsByChapter[chKey] = new Set();
-                const defKey = item.suggested_definition.slice(0, 100);
+                // Deduplicate by marker + definition text, not by definition text alone.
+                // Distinct markers in scholarly EPUBs often share placeholder definitions
+                // such as "Added here:" and must each retain their own definition.
+                const defKey = `${item.marker || ''}|${item.suggested_definition.slice(0, 100)}`;
                 if (seenDefsByChapter[chKey].has(defKey)) {
                     item.suggested_definition = null;
                 } else {
