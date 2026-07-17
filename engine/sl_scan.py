@@ -1291,6 +1291,34 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
 
     # Build a global id->definition map (common in EPUBs where notes live in separate files).
     global_defs_by_id: Dict[str, str] = {}
+    # File-scoped id->definition map, used only when the same fragment id is reused
+    # across spine items (e.g. per-chapter footnotes like ref_footnotebookmark_end1).
+    file_scoped_defs_by_id: Dict[str, Dict[str, str]] = defaultdict(dict)
+
+    def _register_file_scoped_def(fid: str, txt: str, tag: Optional[Any] = None) -> None:
+        if fid and txt:
+            # Only register real note/footnote definitions. Require a note-class
+            # parent paragraph (or the tag itself to be note-like) so we do not
+            # treat bare anchors/backlinks that reuse the same id in many files
+            # as colliding definitions.
+            if tag is not None:
+                try:
+                    cls = " ".join(tag.get("class") or "").lower()
+                    if not _note_class_re.search(cls):
+                        p = tag.find_parent("p")
+                        if p is not None:
+                            p_cls = " ".join(p.get("class") or "").lower()
+                            if "footnote" not in p_cls and "endnote" not in p_cls and "note" not in p_cls:
+                                return
+                        else:
+                            return
+                except Exception:
+                    return
+            # Only register substantial definitions, not bare marker anchors.
+            stripped = txt.strip()
+            if len(stripped) > 4 and not re.fullmatch(r"\d{1,3}[\.:\)]?", stripped):
+                file_scoped_defs_by_id[item_file_key][fid] = txt
+
     # Fallback definitions for non-standard footnote fragment IDs that the primary
     # pattern-based harvester misses (e.g. inline endnotes like c3_rfn1).  These are
     # applied in post-processing only to anchors that would otherwise be unpaired, so
@@ -1422,6 +1450,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
         html_text = html_content.decode("utf-8", errors="ignore") if isinstance(html_content, bytes) else str(html_content)
         soup = BeautifulSoup(html_text, "html.parser")
         name = (getattr(item, "get_name", lambda: "")() if hasattr(item, "get_name") else "")
+        item_file_key = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
         text_all = _preprocess_for_notes(soup.get_text("\n"))
         lines = [_clean_line_for_parsing(l.rstrip("\r")) for l in text_all.split("\n")]
 
@@ -1573,6 +1602,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
             harvested_block = _harvest_id_note_block(tag)
             if harvested_block:
                 global_defs_by_id[tag_id] = harvested_block
+                _register_file_scoped_def(tag_id, harvested_block, tag)
                 # For <a> tags inside note-like parents, also store the clean
                 # parent-paragraph text as a fallback. The harvested block can
                 # concatenate multiple definitions, losing the individual note.
@@ -1589,8 +1619,10 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                                         single = _safe_text(m.group(2))
                                         if single and len(single) > 10:
                                             global_defs_by_id[tag_id] = single
+                                            _register_file_scoped_def(tag_id, single, tag)
                                     elif len(p_text) > 20:
                                         global_defs_by_id[tag_id] = p_text
+                                        _register_file_scoped_def(tag_id, p_text, tag)
                     except Exception:
                         pass
                 continue
@@ -1609,13 +1641,16 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         harvested = _safe_text(m.group(2))
                         if harvested:
                             global_defs_by_id[tag_id] = harvested
+                            _register_file_scoped_def(tag_id, harvested, tag)
                             continue
                     if p_text and len(p_text) > len(text) + 8:
                         global_defs_by_id[tag_id] = p_text
+                        _register_file_scoped_def(tag_id, p_text, tag)
                         continue
 
             # Some EPUBs include the marker itself at the start; keep it as-is.
             global_defs_by_id[tag_id] = text
+            _register_file_scoped_def(tag_id, text, tag)
 
         # 2) Harvest marker-based definitions from notes-like documents (covers books without per-note ids)
         name_l = (name or "").lower()
@@ -1879,6 +1914,19 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
     # prevents the fallback from changing existing marker/id_link matches in
     # already-working books.
     missing_ids = footnote_fragment_ids - set(global_defs_by_id.keys())
+
+    # Detect fragment ids that are reused across spine items. These collide in
+    # the global map and must be resolved via file-scoped lookup.
+    fragment_collision_ids: set[str] = set()
+    try:
+        _frag_file_counts: Dict[str, int] = defaultdict(int)
+        for file_key, frag_map in file_scoped_defs_by_id.items():
+            for fid in frag_map.keys():
+                _frag_file_counts[fid] += 1
+        fragment_collision_ids = {fid for fid, cnt in _frag_file_counts.items() if cnt > 1}
+    except Exception:
+        fragment_collision_ids = set()
+
     if missing_ids:
 
         def _is_standard_note_id(mid: str) -> bool:
@@ -4187,6 +4235,8 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         defs_for_group,
                         source_meta,
                         definitions_by_id=global_defs_by_id,
+                        local_definitions_by_id=file_scoped_defs_by_id.get(chapter_file_key, {}),
+                        fragment_collision_ids=fragment_collision_ids,
                         id_start=next_id,
                         forward_looking=(split is None),
                     )
@@ -4197,6 +4247,8 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     definitions,
                     source_meta,
                     definitions_by_id=global_defs_by_id,
+                    local_definitions_by_id=file_scoped_defs_by_id.get(chapter_file_key, {}),
+                    fragment_collision_ids=fragment_collision_ids,
                     id_start=next_id,
                     forward_looking=(split is None),
                 )
@@ -4207,6 +4259,8 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 definitions,
                 source_meta,
                 definitions_by_id=global_defs_by_id,
+                local_definitions_by_id=file_scoped_defs_by_id.get(chapter_file_key, {}),
+                fragment_collision_ids=fragment_collision_ids,
                 id_start=next_id,
                 forward_looking=(split is None),
             )
@@ -4311,6 +4365,8 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         definitions,
                         source_meta,
                         definitions_by_id=global_defs_by_id,
+                        local_definitions_by_id=file_scoped_defs_by_id.get(chapter_file_key, {}),
+                        fragment_collision_ids=fragment_collision_ids,
                         id_start=next_id,
                     )
             except Exception:
@@ -5125,6 +5181,8 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                         definitions,
                         source_meta,
                         definitions_by_id=global_defs_by_id,
+                        local_definitions_by_id=file_scoped_defs_by_id.get(chapter_file_key, {}),
+                        fragment_collision_ids=fragment_collision_ids,
                         id_start=next_id,
                     )
             except Exception:

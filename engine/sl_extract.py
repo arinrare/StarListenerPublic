@@ -2764,6 +2764,8 @@ def _pair_anchors_to_definitions(
     definitions: List[Dict[str, Any]],
     source_meta: Dict[str, Any],
     definitions_by_id: Optional[Dict[str, str]] = None,
+    local_definitions_by_id: Optional[Dict[str, str]] = None,
+    fragment_collision_ids: Optional[set[str]] = None,
     id_start: int = 0,
     *,
     forward_looking: bool = False,
@@ -2886,15 +2888,34 @@ def _pair_anchors_to_definitions(
         confidence = "Manual Review Required"
         match_method = "none"
 
-        # 0) If the EPUB provides a fragment id, use it (highest confidence)
+        # 0) If the EPUB provides a fragment id, use it (highest confidence).
+        # When the same fragment id is reused across spine items (e.g.
+        # per-chapter footnotes like ref_footnotebookmark_end1 in every
+        # chapter), prefer the definition harvested from the target spine item
+        # to avoid global-map collisions.
         href = a.get("href")
-        if definitions_by_id:
+        current_file = ""
+        if source_meta.get("chapter_name"):
+            current_file = str(source_meta.get("chapter_name")).replace("\\", "/").rsplit("/", 1)[-1].lower()
+        target_file = ""
+        if href and "#" in href:
+            target_file = str(href.split("#", 1)[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if definitions_by_id or local_definitions_by_id:
             frag = a.get("_frag")
             if not frag and href and "#" in href:
                 frag = href.split("#", 1)[1]
             frag = (_safe_text(str(frag or ""))).strip()
             if frag:
-                def_text = definitions_by_id.get(frag)
+                def_text = None
+                if (
+                    local_definitions_by_id
+                    and fragment_collision_ids
+                    and frag in fragment_collision_ids
+                    and (not target_file or target_file == current_file)
+                ):
+                    def_text = local_definitions_by_id.get(frag)
+                if def_text is None and definitions_by_id:
+                    def_text = definitions_by_id.get(frag)
                 if def_text:
                     suggested_def = def_text
                     confidence_score = 0.98

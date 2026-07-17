@@ -708,9 +708,9 @@ def _label_is_plausible_chapter_label(label: Optional[str]) -> bool:
         return False
 
     # Colon in a label is usually a glossary/definition marker, but
-    # TOC-style labels like "I: Chapter Title" are real headings.
+    # TOC-style labels like "I: Chapter Title" or "Chapter 1: Title" are real headings.
     if ":" in t or ";" in t or "$" in t:
-        if not re.match(r"^\s*([IVXLC]{1,12}|\d{1,3}):\s", t):
+        if not re.match(r"^\s*([IVXLC]{1,12}|\d{1,3}):\s", t) and not re.match(r"^\s*Chapter\s+\d{1,3}\s*:\s", t, re.IGNORECASE):
             return False
     if re.search(r"\bsee\b", t, re.IGNORECASE):
         return False
