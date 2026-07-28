@@ -989,7 +989,25 @@ def _build_voice_segments(
         else:
             skipped_no_def.append(fn)
 
-        last_pos = sentence_end + 1
+            last_pos = sentence_end + 1
+
+            # For inline markers (e.g. *), the definition text may
+            # appear inline right after the marker.  Advance last_pos
+            # past it so the next prose segment doesn't re-emit it.
+            if (definition and str(definition).strip()
+                    and pos is not None and marker_raw):
+                _def_words = str(definition).split()
+                if len(_def_words) >= 5:
+                    _end_words = _def_words[-5:]
+                    _pat = r"\s+".join(
+                        re.escape(w) for w in _end_words)
+                    _tail = raw_text[pos + len(marker_raw):]
+                    _m = re.search(_pat, _tail)
+                    if _m:
+                        last_pos = max(
+                            last_pos,
+                            pos + len(marker_raw) + _m.end(),
+                        )
 
     remaining = _remove_notes_block(raw_text[last_pos:])
     if remaining == raw_text[last_pos:] and last_pos > 0:
