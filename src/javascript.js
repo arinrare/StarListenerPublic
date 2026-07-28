@@ -686,6 +686,67 @@ document.addEventListener('DOMContentLoaded', async function() {
             return a.localeCompare(b, undefined, { numeric: true });
         });
 
+        // ----- Helper: update a single card's button state -----
+        const _updateCardButtons = (card, item) => {
+            const confirmBtn = card.querySelector('.confirm-btn');
+            const ignoreBtn = card.querySelector('.ignore-btn');
+            const isConfirmed = item.user_status === 'confirmed';
+            const isIgnored = item.user_status === 'ignored';
+
+            card.style.opacity = (isConfirmed || isIgnored) ? '0.3' : '';
+
+            if (confirmBtn) {
+                if (isConfirmed) {
+                    confirmBtn.textContent = 'Unconfirm';
+                    confirmBtn.style.display = '';
+                    confirmBtn.style.outline = '2px solid #4caf50';
+                } else {
+                    confirmBtn.textContent = 'Confirm Link';
+                    confirmBtn.style.display = isIgnored ? 'none' : '';
+                    confirmBtn.style.outline = 'none';
+                }
+            }
+            if (ignoreBtn) {
+                if (isIgnored) {
+                    ignoreBtn.textContent = 'Unignore';
+                    ignoreBtn.style.display = '';
+                    ignoreBtn.style.outline = '2px solid #ff9800';
+                } else {
+                    ignoreBtn.textContent = 'Ignore';
+                    ignoreBtn.style.display = isConfirmed ? 'none' : '';
+                    ignoreBtn.style.outline = 'none';
+                }
+            }
+        };
+
+        // ----- Helper: update chapter header button state -----
+        const _updateChapterButtons = (chapterWrapper) => {
+            const cards = chapterWrapper.querySelectorAll('.footnote-card');
+            let allConfirmed = cards.length > 0;
+            let allIgnored = cards.length > 0;
+            cards.forEach(card => {
+                const idAttr = card.getAttribute('data-id');
+                const id = idAttr != null ? Number(idAttr) : null;
+                const it = id != null ? _matches.find(m => m.id === id) : null;
+                if (!it || it.user_status !== 'confirmed') allConfirmed = false;
+                if (!it || it.user_status !== 'ignored') allIgnored = false;
+            });
+
+            const header = chapterWrapper.querySelector('.group-header');
+            const confirmBtn = header ? header.querySelector('.chapter-confirm-btn') : null;
+            const ignoreBtn = header ? header.querySelector('.chapter-ignore-btn') : null;
+            if (allConfirmed) {
+                if (confirmBtn) { confirmBtn.textContent = 'Unconfirm Chapter'; confirmBtn.style.display = ''; }
+                if (ignoreBtn) ignoreBtn.style.display = 'none';
+            } else if (allIgnored) {
+                if (ignoreBtn) { ignoreBtn.textContent = 'Unignore Chapter'; ignoreBtn.style.display = ''; }
+                if (confirmBtn) confirmBtn.style.display = 'none';
+            } else {
+                if (confirmBtn) { confirmBtn.textContent = 'Confirm Chapter'; confirmBtn.style.display = ''; }
+                if (ignoreBtn) { ignoreBtn.textContent = 'Ignore Chapter'; ignoreBtn.style.display = ''; }
+            }
+        };
+
         chapterKeys.forEach(chKey => {
             const tryMarkerInt = (m) => {
                 const t = String(m || '').trim();
@@ -824,66 +885,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                 }
             });
 
-            // ----- Helper: update a single card's button state -----
-            const _updateCardButtons = (card, item) => {
-                const confirmBtn = card.querySelector('.confirm-btn');
-                const ignoreBtn = card.querySelector('.ignore-btn');
-                const isConfirmed = item.user_status === 'confirmed';
-                const isIgnored = item.user_status === 'ignored';
-
-                card.style.opacity = (isConfirmed || isIgnored) ? '0.3' : '';
-
-                if (confirmBtn) {
-                    if (isConfirmed) {
-                        confirmBtn.textContent = 'Unconfirm';
-                        confirmBtn.style.display = '';
-                        confirmBtn.style.outline = '2px solid #4caf50';
-                    } else {
-                        confirmBtn.textContent = 'Confirm Link';
-                        confirmBtn.style.display = isIgnored ? 'none' : '';
-                        confirmBtn.style.outline = 'none';
-                    }
-                }
-                if (ignoreBtn) {
-                    if (isIgnored) {
-                        ignoreBtn.textContent = 'Unignore';
-                        ignoreBtn.style.display = '';
-                        ignoreBtn.style.outline = '2px solid #ff9800';
-                    } else {
-                        ignoreBtn.textContent = 'Ignore';
-                        ignoreBtn.style.display = isConfirmed ? 'none' : '';
-                        ignoreBtn.style.outline = 'none';
-                    }
-                }
-            };
-
-            // ----- Helper: update chapter header button state -----
-            const _updateChapterButtons = () => {
-                const cards = chapterWrapper.querySelectorAll('.footnote-card');
-                let allConfirmed = cards.length > 0;
-                let allIgnored = cards.length > 0;
-                cards.forEach(card => {
-                    const idAttr = card.getAttribute('data-id');
-                    const id = idAttr != null ? Number(idAttr) : null;
-                    const it = id != null ? items.find(m => m.id === id) : null;
-                    if (!it || it.user_status !== 'confirmed') allConfirmed = false;
-                    if (!it || it.user_status !== 'ignored') allIgnored = false;
-                });
-
-                const confirmBtn = header.querySelector('.chapter-confirm-btn');
-                const ignoreBtn = header.querySelector('.chapter-ignore-btn');
-                if (allConfirmed) {
-                    if (confirmBtn) { confirmBtn.textContent = 'Unconfirm Chapter'; confirmBtn.style.display = ''; }
-                    if (ignoreBtn) ignoreBtn.style.display = 'none';
-                } else if (allIgnored) {
-                    if (ignoreBtn) { ignoreBtn.textContent = 'Unignore Chapter'; ignoreBtn.style.display = ''; }
-                    if (confirmBtn) confirmBtn.style.display = 'none';
-                } else {
-                    if (confirmBtn) { confirmBtn.textContent = 'Confirm Chapter'; confirmBtn.style.display = ''; }
-                    if (ignoreBtn) { ignoreBtn.textContent = 'Ignore Chapter'; ignoreBtn.style.display = ''; }
-                }
-            };
-            _updateChapterButtons();
+            _updateChapterButtons(chapterWrapper);
 
             // ----- Chapter Confirm button -----
             header.querySelector('.chapter-confirm-btn').addEventListener('click', async () => {
@@ -902,7 +904,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                     const it = id != null ? items.find(m => m.id === id) : null;
                     if (it) _updateCardButtons(card, it);
                 });
-                _updateChapterButtons();
+                _updateChapterButtons(chapterWrapper);
             });
 
             // ----- Chapter Ignore button -----
@@ -921,7 +923,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                     const it = id != null ? items.find(m => m.id === id) : null;
                     if (it) _updateCardButtons(card, it);
                 });
-                _updateChapterButtons();
+                _updateChapterButtons(chapterWrapper);
             });
         });
 
@@ -947,68 +949,9 @@ document.addEventListener('DOMContentLoaded', async function() {
                 if (_nmPath) await window.electronAPI.writeJsonFile(_nmPath, _matches);
                 lastScanResults = JSON.parse(JSON.stringify(_matches));
 
-                // Find the helper functions in the enclosing scope by looking
-                // at the chapter wrapper's data attribute to find the right items.
-                if (!_updateCardButtonsRef || !_updateChapterButtonsRef) {
-                    // Fallback: manually update this card.
-                    const confirmBtn = card.querySelector('.confirm-btn');
-                    const ignoreBtn = card.querySelector('.ignore-btn');
-                    const isConfirmed = item.user_status === 'confirmed';
-                    const isIgnored = item.user_status === 'ignored';
-                    card.style.opacity = (isConfirmed || isIgnored) ? '0.3' : '';
-                    if (confirmBtn) {
-                        if (isConfirmed) {
-                            confirmBtn.textContent = 'Unconfirm';
-                            confirmBtn.style.display = '';
-                            confirmBtn.style.outline = '2px solid #4caf50';
-                        } else {
-                            confirmBtn.textContent = 'Confirm Link';
-                            confirmBtn.style.display = '';
-                            confirmBtn.style.outline = 'none';
-                        }
-                    }
-                    if (ignoreBtn) {
-                        if (isIgnored) {
-                            ignoreBtn.textContent = 'Unignore';
-                            ignoreBtn.style.display = '';
-                            ignoreBtn.style.outline = '2px solid #ff9800';
-                        } else {
-                            ignoreBtn.textContent = 'Ignore';
-                            ignoreBtn.style.display = isConfirmed ? 'none' : '';
-                            ignoreBtn.style.outline = 'none';
-                        }
-                    }
-                    // Try to update chapter buttons via the chapter label.
-                    if (chapterWrapper) {
-                        const chLabel = (chapterWrapper.querySelector('.group-header h3') || {}).textContent || '';
-                        const allWrappers = document.querySelectorAll('.chapter-wrapper');
-                        allWrappers.forEach(cw => {
-                            const hh = cw.querySelector('.group-header h3');
-                            if (hh && hh.textContent === chLabel) {
-                                const cards2 = cw.querySelectorAll('.footnote-card');
-                                let allConf = cards2.length > 0, allIgn = cards2.length > 0;
-                                cards2.forEach(c2 => {
-                                    const id2 = Number(c2.getAttribute('data-id'));
-                                    const it2 = id2 != null && !isNaN(id2) ? _matches.find(m => m.id === id2) : null;
-                                    if (!it2 || it2.user_status !== 'confirmed') allConf = false;
-                                    if (!it2 || it2.user_status !== 'ignored') allIgn = false;
-                                });
-                                const confBtn = cw.querySelector('.chapter-confirm-btn');
-                                const ignBtn = cw.querySelector('.chapter-ignore-btn');
-                                if (allConf) {
-                                    if (confBtn) { confBtn.textContent = 'Unconfirm Chapter'; confBtn.style.display = ''; }
-                                    if (ignBtn) ignBtn.style.display = 'none';
-                                } else if (allIgn) {
-                                    if (ignBtn) { ignBtn.textContent = 'Unignore Chapter'; ignBtn.style.display = ''; }
-                                    if (confBtn) confBtn.style.display = 'none';
-                                } else {
-                                    if (confBtn) { confBtn.textContent = 'Confirm Chapter'; confBtn.style.display = ''; }
-                                    if (ignBtn) { ignBtn.textContent = 'Ignore Chapter'; ignBtn.style.display = ''; }
-                                }
-                            }
-                        });
-                    }
-                }
+                // Update this card and the chapter header buttons.
+                _updateCardButtons(card, item);
+                if (chapterWrapper) _updateChapterButtons(chapterWrapper);
             });
         });
 
@@ -1032,64 +975,9 @@ document.addEventListener('DOMContentLoaded', async function() {
                 if (_nmPath) await window.electronAPI.writeJsonFile(_nmPath, _matches);
                 lastScanResults = JSON.parse(JSON.stringify(_matches));
 
-                // Fallback: manually update this card and chapter.
-                const confirmBtn = card.querySelector('.confirm-btn');
-                const ignoreBtn2 = card.querySelector('.ignore-btn');
-                const isConfirmed = item.user_status === 'confirmed';
-                const isIgnored = item.user_status === 'ignored';
-                card.style.opacity = (isConfirmed || isIgnored) ? '0.3' : '';
-                if (confirmBtn) {
-                    if (isConfirmed) {
-                        confirmBtn.textContent = 'Unconfirm';
-                        confirmBtn.style.display = '';
-                        confirmBtn.style.outline = '2px solid #4caf50';
-                    } else {
-                        confirmBtn.textContent = 'Confirm Link';
-                        confirmBtn.style.display = isIgnored ? 'none' : '';
-                        confirmBtn.style.outline = 'none';
-                    }
-                }
-                if (ignoreBtn2) {
-                    if (isIgnored) {
-                        ignoreBtn2.textContent = 'Unignore';
-                        ignoreBtn2.style.display = '';
-                        ignoreBtn2.style.outline = '2px solid #ff9800';
-                    } else {
-                        ignoreBtn2.textContent = 'Ignore';
-                        ignoreBtn2.style.display = isConfirmed ? 'none' : '';
-                        ignoreBtn2.style.outline = 'none';
-                    }
-                }
-                // Update chapter buttons.
-                if (chapterWrapper) {
-                    const chLabel = (chapterWrapper.querySelector('.group-header h3') || {}).textContent || '';
-                    const allWrappers = document.querySelectorAll('.chapter-wrapper');
-                    allWrappers.forEach(cw => {
-                        const hh = cw.querySelector('.group-header h3');
-                        if (hh && hh.textContent === chLabel) {
-                            const cards2 = cw.querySelectorAll('.footnote-card');
-                            let allConf = cards2.length > 0, allIgn = cards2.length > 0;
-                            cards2.forEach(c2 => {
-                                const id2 = Number(c2.getAttribute('data-id'));
-                                const it2 = id2 != null && !isNaN(id2) ? _matches.find(m => m.id === id2) : null;
-                                if (!it2 || it2.user_status !== 'confirmed') allConf = false;
-                                if (!it2 || it2.user_status !== 'ignored') allIgn = false;
-                            });
-                            const confBtn = cw.querySelector('.chapter-confirm-btn');
-                            const ignBtn = cw.querySelector('.chapter-ignore-btn');
-                            if (allConf) {
-                                if (confBtn) { confBtn.textContent = 'Unconfirm Chapter'; confBtn.style.display = ''; }
-                                if (ignBtn) ignBtn.style.display = 'none';
-                            } else if (allIgn) {
-                                if (ignBtn) { ignBtn.textContent = 'Unignore Chapter'; ignBtn.style.display = ''; }
-                                if (confBtn) confBtn.style.display = 'none';
-                            } else {
-                                if (confBtn) { confBtn.textContent = 'Confirm Chapter'; confBtn.style.display = ''; }
-                                if (ignBtn) { ignBtn.textContent = 'Ignore Chapter'; ignBtn.style.display = ''; }
-                            }
-                        }
-                    });
-                }
+                // Update this card and the chapter header buttons.
+                _updateCardButtons(card, item);
+                if (chapterWrapper) _updateChapterButtons(chapterWrapper);
             });
         });
 

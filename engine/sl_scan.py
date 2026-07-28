@@ -88,6 +88,7 @@ try:
         _clean_line_for_parsing,
         _preprocess_for_notes,
         _def_line_regex,
+        _symbol_def_line_regex,
         _marker_category_from_raw,
         _normalize_marker,
     )
@@ -104,6 +105,7 @@ except ModuleNotFoundError:  # pragma: no cover
         _clean_line_for_parsing,
         _preprocess_for_notes,
         _def_line_regex,
+        _symbol_def_line_regex,
         _marker_category_from_raw,
         _normalize_marker,
     )
@@ -2258,9 +2260,14 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
             # Soup-level paragraph detection: extracts definitions from <p> tags.
             # Used when text-based extraction fails, OR when the book uses raw
             # <sup> markers that fool infer_notes_split (detected in Pass 1).
+            # For symbol-profile scans we also run it so inline author notes
+            # (e.g. "*Yes, bags...") can be harvested even when text-based
+            # extraction found non-symbol false positives.
+            is_symbol_profile = allowed_categories == {"symbol"}
             soup_defs2: List[Dict[str, Any]] = []
-            if (split is None and not text_definitions) or sup_based_book or (structured_footnote_epub and not structured_note_defs):
+            if (split is None and not text_definitions) or sup_based_book or (structured_footnote_epub and not structured_note_defs) or is_symbol_profile:
                 def_re2 = _def_line_regex()
+                sym_def_re2 = _symbol_def_line_regex()
                 _inline_next_marker_re = re.compile(
                     r"(?:\s+|^)(\*+|†+|‡+|§+)\s+",
                     re.UNICODE,
@@ -2283,6 +2290,8 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                     elif pt.startswith("**") and len(pt) > 2 and not pt[2].isalnum() and not pt[2].isspace():
                         pt = "*** " + pt[3:].strip()
                     m_start = def_re2.match(pt)
+                    if not m_start and is_symbol_profile:
+                        m_start = sym_def_re2.match(pt)
                     if not m_start:
                         continue
                     marker_norm = _normalize_marker(m_start.group(1))
@@ -2340,12 +2349,15 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                             "line_index": pi + 1,
                             "origin_index": chapter_index,
                         })
-                elif raw_defs and len(lines) < 500:
+                elif raw_defs and (len(lines) < 500 or is_symbol_profile):
                     # Narrow path: short chapters with inline definitions.
                     # Only activates in compact chapters where text
                     # extraction may be poor quality.  Exclude letter
                     # false-positives (like "A" at start of prose paragraphs)
                     # before processing, mirroring the main-path filter.
+                    # For symbol-profile books, also allow this path in long
+                    # chapters, since web-novel author notes often appear 1-4
+                    # times per chapter and can be far from the start.
                     filtered = [(pi, mk, body) for pi, mk, body in raw_defs
                                 if _marker_category_from_raw(mk) in {"symbol", "num_plain", "num_paren", "num_bracket"}]
                     if filtered:
@@ -2361,7 +2373,19 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
             # merging in text definitions for markers not covered by soup
             # (handles mixed marker types like * + sup in the same book).
             structured_fallback = structured_footnote_epub and not structured_note_defs
-            if (sup_based_book or structured_fallback) and soup_defs2:
+            if is_symbol_profile:
+                # For symbol-profile scans, merge symbol definitions from both
+                # text extraction and soup-level inline-paragraph detection.
+                # Text definitions take precedence; soup fills in markers that
+                # text extraction missed (common for web-novel inline author notes).
+                text_symbols = [d for d in text_definitions if _marker_category_from_raw(d.get("marker")) == "symbol"]
+                soup_symbols = [d for d in soup_defs2 if _marker_category_from_raw(d.get("marker")) == "symbol"]
+                text_markers = {d["marker"] for d in text_symbols}
+                definitions = list(text_symbols)
+                for d in soup_symbols:
+                    if d["marker"] not in text_markers:
+                        definitions.append(d)
+            elif (sup_based_book or structured_fallback) and soup_defs2:
                 soup_markers = {d["marker"] for d in soup_defs2}
                 definitions = list(soup_defs2)
                 for d in text_definitions:
@@ -2371,7 +2395,7 @@ def scan_epub_for_footnotes(epub_path: str, *, options: Optional[ScanOptions] = 
                 definitions = soup_defs2
             else:
                 definitions = text_definitions
-            
+
             definitions = _filter_definitions_by_profile(definitions, allowed_categories)
 
         # Build a set of definition body prefixes for the definition-header

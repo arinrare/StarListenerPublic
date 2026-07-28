@@ -158,6 +158,15 @@ def _def_line_regex() -> re.Pattern:
     )
 
 
+# Fallback regex for symbol markers that are immediately followed by the
+# definition text without a separator (e.g. "*Yes, bags...", "**Goblins...").
+# This is common in web-novel author notes that use inline asterisks.
+def _symbol_def_line_regex() -> re.Pattern:
+    return re.compile(
+        r"^\s*(\*+|†+|‡+|§+)\s*([A-Za-z].*?)\s*$",
+        re.UNICODE,
+    )
+
 
 def _marker_category_from_raw(raw: str) -> str:
     """Classify a raw marker string into a coarse category.

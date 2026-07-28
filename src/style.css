@@ -40,9 +40,7 @@ select {
         padding: 15px;
         margin-bottom: 15px;
         border-radius: 8px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
+        display: block;
         border: 1px solid #333;
 }
 
@@ -98,6 +96,18 @@ select {
 button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+}
+
+.card-actions {
+    margin-top: 15px;
+    text-align: right;
+    position: relative;
+    z-index: 1;
+}
+
+.card-actions button {
+    display: inline-block;
+    margin-left: 8px;
 }
 
 .voice-selectors {

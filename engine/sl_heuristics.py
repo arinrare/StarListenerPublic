@@ -1677,6 +1677,12 @@ def _is_likely_punctuation_asterisk(context: str) -> bool:
     ctx = _safe_text(context)
     if not ctx:
         return True
+    # Do not reject word-boundary asterisks like "word*." or "word!*"; these
+    # are common note markers in web-novel author notes. The key signal is an
+    # asterisk immediately preceded by a lowercase word and terminal
+    # punctuation, with no intervening space.
+    if re.search(r"[a-z](?:\*+[.!?]|[.!?]\*+)", ctx):
+        return False
     if re.search(r"(?<![A-Z])[.;:!?]\*\s", ctx):
         return True
     if re.search(r"[.!?]\s*\*\s*[A-Z]", ctx):
